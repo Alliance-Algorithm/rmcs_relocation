@@ -1,5 +1,7 @@
 .cache/
 .codex
+__pycache__/
+*.pyc
 
 # ROS / colcon build artifacts
 build/
