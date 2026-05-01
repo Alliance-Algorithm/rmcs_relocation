@@ -1,0 +1,7 @@
+.cache/
+.codex
+
+# ROS / colcon build artifacts
+build/
+install/
+log/

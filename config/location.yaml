@@ -1,0 +1,183 @@
+rmcs_relocation:
+  ros__parameters:
+    map_path: "/workspaces/RMCS/rmcs_ws/src/rmcs-navigation-deps/rmcs-relocation/maps/world_map.pcd"
+    world_frame: "world"
+    odom_frame: "odom"
+    base_frame: "base_link"
+    service_name: "/rmcs_relocation/relocalize"
+    publish_tf_rate_hz: 10.0
+
+    # initial.* — 初始重定位 (MODE_INITIAL, mode=0)
+    initial:
+        # [1-1] 点云采集（失败率高的第一排查点）
+        pointcloud_topic: "/cloud_registered_undistort"
+
+        # 采集时长
+        collect_duration_sec: 2.0
+        # 最低累积点数,在采集时长内没达到则失败
+        min_accumulated_points: 2500
+
+        # [1-2] 配准质量（影响 score 绝对值）
+        # 子图半径(m)。
+        submap_radius_m: 4.0
+
+        # 粗搜 GICP 迭代次数。不够则粗配不过
+        coarse_iterations: 12
+        # 精搜 GICP 迭代次数
+        refine_iterations: 8
+        # 精确配准迭代次数-------------------慎重减小！！！-------------------
+        precise_iterations: 20
+        # GICP 最大对应距离(m)
+        max_correspondence_distance_m: 0.5
+        # 配准得分阈值。值越小要求越严
+        score_threshold: 0.04
+
+        # [1-3] yaw 搜索窗口（当"初值 yaw 有偏差就失败"时就调）
+        # 粗搜 yaw 窗口(°)
+        yaw_search_window_deg: 15.0
+        # 粗搜步长(°)
+        coarse_yaw_step_deg: 15.0
+        # 精搜步长(°)
+        refine_yaw_step_deg: 15.0
+        # 精搜候选保留数量
+        coarse_top_k: 1
+
+        # [1-4] 点云预处理
+        # 体素降采样大小(m)，能0.2就0.2,时再步行再降到0.15
+        voxel_leaf_m: 0.2
+
+        #这两个不要动
+        # 离群点滤波邻域大小
+        outlier_mean_k: 30
+        # 离群点滤波标准差倍数
+        outlier_stddev_mul_thresh: 0.5
+
+        # [1-5] 验收阈值（依据实测 score 定值）
+        # 与初猜的平移误差上限(m)。定位正确但被拒 → 放宽
+        initial_max_translation_error_m: 0.5
+        # 与初猜的 yaw 误差上限(°)
+        initial_max_yaw_error_deg: 30.0
+
+        # 场地边界，"out_of_bounds"调，不然别动，按地图来
+        field_bounds:
+          min_x: -2.0
+          max_x: 7.0
+          min_y: -5.5
+          max_y: 5.5
+          min_z: -0.5
+          max_z: 0.5
+
+
+    # lost.* — 丢失位置重定位 (MODE_LOST, mode=2)
+    lost:
+        # [2-1] 点云采集
+        pointcloud_topic: "/cloud_registered_undistort"
+        collect_duration_sec: 0.9
+        min_accumulated_points: 1500
+
+        # [2-2] tier 判定参数（决定走 LOCAL 还是 WIDE）
+        # sigma_xy ≤ 此值 → LOCAL，否则 WIDE。影响 tier 选择和起配搜索半径
+        local_sigma_xy_m: 5.0
+        # sigma_yaw ≤ 此值 → LOCAL，否则 WIDE
+        local_sigma_yaw_deg: 60.0
+
+        # [2-3] 配准质量参数（核心）
+        # LOCAL 子图半径(m)
+        submap_radius_local_m: 3.5
+        # WIDE 子图半径(m)
+        submap_radius_wide_m: 5.0
+
+        # WIDE 候选解数量上限
+        max_candidate_count: 1
+
+        # LOCAL 粗搜迭代
+        coarse_iterations_local: 10
+        # LOCAL 精搜迭代
+        refine_iterations_local: 5
+        # OCAL 精确迭代。增大直接改善 score
+        precise_iterations_local: 15
+
+        # WIDE 粗搜迭代
+        coarse_iterations_wide: 12
+        # WIDE 精搜迭代
+        refine_iterations_wide: 8
+        # WIDE 精确迭代
+        precise_iterations_wide: 20
+
+        # GICP 最大对应距离(m)
+        max_correspondence_distance_m: 0.9
+
+        # [2-4] yaw 搜索窗口 
+        # LOCAL yaw 搜索窗(°)
+        local_yaw_window_deg: 15.0
+        # WIDE yaw 搜索窗(°) 
+        wide_yaw_window_deg: 45.0
+        # LOCAL 粗搜步长(°)
+        local_coarse_yaw_step_deg: 15.0
+        # WIDE 粗搜步长(°)
+        wide_coarse_yaw_step_deg: 22.5
+        # 精搜步长(°)
+        refine_yaw_step_deg: 15.0
+        # LOCAL/WIDE 粗搜提前停止阈值（仅用于 coarse early-break，不参与最终验收）
+        coarse_score_threshold_local: 0.3
+        coarse_score_threshold_wide: 0.15
+
+        # [2-4a] 不动
+        enable_map_consistency_filter: false
+        map_consistency_distance_m: 0.8
+        min_retained_fraction: 0.15
+        rank_weight_inlier: 0.5
+        rank_weight_distance: 0.3
+
+        # [2-5] 接受阈值（依据配准质量定值，最后调！）
+        # LOCAL score 阈值
+        score_threshold_local: 0.08
+        # WIDE score 阈值
+        score_threshold_wide: 0.08
+        # LOCAL 最小内点比例
+        min_inlier_ratio_local: 0.20
+        # WIDE 最小内点比例
+        min_inlier_ratio_wide: 0.15
+        # LOCAL 与先验的最大平移偏差(m)
+        max_distance_from_prior_local_m: 3.0
+        # WIDE 与先验的最大平移偏差(m)
+        max_distance_from_prior_wide_m: 10.0
+        # LOCAL 与先验的最大 yaw 偏差(°)
+        max_yaw_from_prior_local_deg: 45.0
+        # WIDE 与先验的最大 yaw 偏差(°)
+        max_yaw_from_prior_wide_deg: 120.0
+
+        field_bounds:
+          min_x: -2.0
+          max_x: 7.0
+          min_y: -5.5
+          max_y: 5.5
+          min_z: -1.0
+          max_z: 1.0
+
+    # 3. health.* — 健康监控
+    health:
+        # [3-1] 基础参数
+        # 健康评估频率 (Hz)
+        rate_hz: 2.0
+        # 每次评估随机采样点数
+        sample_points: 300
+        # 判定内点的距离阈值(m)。增大 = 内点更多 = 状态偏健康
+        inlier_distance_m: 0.8
+
+        # [3-2] 阈值与驻留时间
+        # 进入 WARNING 的残差阈值(m)。正常行驶中位数残差 × 2.0~3.0
+        warn_threshold_m: 0.5
+        # 进入 UNHEALTHY 的残差阈值(m)。正常行驶中位数残差 × 3.0~4.0
+        lost_threshold_m: 0.8
+        # 内点比例下限（WARNING→UNHEALTHY 条件之一）
+        min_inlier_ratio: 0.20
+        # WARNING 驻留时间(秒)
+        warn_dwell_sec: 1.0
+        # UNHEALTHY 驻留时间(秒)
+        lost_dwell_sec: 2.0
+        # 恢复阈值 = warn_threshold - recover_margin
+        recover_margin_m: 0.1
+        # 恢复驻留时间(秒)
+        recover_dwell_sec: 2.0
+
