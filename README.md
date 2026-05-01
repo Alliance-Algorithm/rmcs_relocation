@@ -14,8 +14,6 @@
 | 操作系统 | Ubuntu 24.04 LTS（推荐） | 与 ROS 2 Jazzy 官方支持版本一致。 |
 | ROS 2 | Jazzy | 代码中依赖 `rclcpp/tf2/tf2_ros/launch_ros`。 |
 | 构建系统 | CMake >= 3.16 | 顶层 `CMakeLists.txt` 要求。 |
-| C++ 标准 | C++23 | `rmcs-relocation_component` 与 `rmcs-relocation_server` 均设置 `cxx_std_23`。 |
-| 编译器 | GCC 或 Clang（支持 C++23） | 建议 GCC 13+。 |
 | 点云库 | PCL（common/io/filters/registration/kdtree） | 核心配准、滤波、KDTree 依赖。 |
 | 线性代数 | Eigen3 | 位姿与矩阵计算依赖。 |
 | 并行库 | OpenMP（推荐） | `small_gicp` 检测到 OpenMP 时会启用并行路径。 |
@@ -239,9 +237,7 @@ ros2 run tf2_ros tf2_echo world odom
 | `src/tools/registration_tools.*` | 配准核心：点云预处理、子图提取、INITIAL/LOST 配准策略。 |
 | `src/server/validator.*` | 重定位结果验收：边界、score、inlier、先验距离、yaw 等。 |
 | `src/server/health_monitor.*` | 健康度评估状态机：HEALTHY/WARNING/UNHEALTHY。 |
-| `src/tools/param_tools.*` | 统一参数读取，组装 runtime/registration/validation/health 配置。 |
 | `src/component/supervisor.*` | `rmcs_executor` 插件，自动触发重定位服务调用。 |
-| `src/tools/geometry_tools.*` | Pose/Transform 与 Eigen Isometry 互转。 |
 
 ## YAML 参数说明（详见`config/location.yaml`）
 
@@ -252,19 +248,6 @@ rmcs_relocation:
   ros__parameters:
     ...
 ```
-
-## Supervisor 组件参数（由上层组件 YAML 注入）
-
-`Supervisor` 是插件组件，不读取 `config/location.yaml`，其参数写在机器人组件配置 sentry.yaml 中。
-
-## 常见问题
-
-- 启动后 `map unavailable`  
-  - 检查 `map_path` 是否存在且可读，确认 `.pcd` 文件路径正确。
-- 服务存在但持续 `initial/lost registration failed`  
-  - 检查点云话题是否有数据、`odom->base_link` TF 是否可查、`min_accumulated_points` 是否过大。
-- `lost registration rejected:*`  
-  - 代表配准算出候选，但被验收器拒绝；需要联调 `score/inlier/field_bounds/先验阈值` 参数。
 
 ## ToDo Lists
 - [x] 测试initial，lost，supervisor基础功能
