@@ -111,5 +111,14 @@ install(DIRECTORY
   launch
   DESTINATION share/${PROJECT_NAME}
 )
+install(PROGRAMS
+  scripts/pcd_publisher.py
+  scripts/tf_to_pose.py
+  DESTINATION lib/${PROJECT_NAME}
+)
+install(DIRECTORY
+  docs
+  DESTINATION share/${PROJECT_NAME}
+)
 
 ament_package()
