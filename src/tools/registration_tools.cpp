@@ -211,6 +211,9 @@ public:
         double epsilon = 1e-6)
         : max_correspondence_distance_m_(max_correspondence_distance_m) {
         registrator_.setRegistrationType("GICP");
+        // VGICP //
+        //registrator_.setRegistrationType("VGICP");
+        //registrator_.setVoXelResolution(0.2);
         registrator_.setMaximumIterations(iterations);
         registrator_.setMaxCorrespondenceDistance(max_correspondence_distance_m_);
         registrator_.setTransformationEpsilon(epsilon);
