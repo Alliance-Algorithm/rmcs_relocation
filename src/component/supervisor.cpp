@@ -88,34 +88,34 @@ struct Supervisor::Impl {
     explicit Impl(Supervisor& owner)
         : owner_(owner)
         , service_name_(
-              owner_.declare_parameter<std::string>("service_name", "/rmcs_relocation/relocalize"))
-        , world_frame_(owner_.declare_parameter<std::string>("world_frame", "world"))
-        , odom_frame_(owner_.declare_parameter<std::string>("odom_frame", "odom"))
-        , base_frame_(owner_.declare_parameter<std::string>("base_frame", "base_link"))
-        , initial_pointcloud_topic_(owner_.declare_parameter<std::string>(
+              owner_.get_parameter_or<std::string>("service_name", "/rmcs_relocation/relocalize"))
+        , world_frame_(owner_.get_parameter_or<std::string>("world_frame", "world"))
+        , odom_frame_(owner_.get_parameter_or<std::string>("odom_frame", "odom"))
+        , base_frame_(owner_.get_parameter_or<std::string>("base_frame", "base_link"))
+        , initial_pointcloud_topic_(owner_.get_parameter_or<std::string>(
               "initial.pointcloud_topic", "/cloud_registered_undistort"))
         , initial_collect_duration_sec_(
-              owner_.declare_parameter<double>("initial.collect_duration_sec", 2.0))
-        , lost_pointcloud_topic_(owner_.declare_parameter<std::string>(
+              owner_.get_parameter_or<double>("initial.collect_duration_sec", 2.0))
+        , lost_pointcloud_topic_(owner_.get_parameter_or<std::string>(
               "lost.pointcloud_topic", "/cloud_registered_undistort"))
         , lost_collect_duration_sec_(
-              owner_.declare_parameter<double>("lost.collect_duration_sec", 2.0))
-        , retry_interval_sec_(owner_.declare_parameter<double>("retry_interval_sec", 2.0))
+              owner_.get_parameter_or<double>("lost.collect_duration_sec", 2.0))
+        , retry_interval_sec_(owner_.get_parameter_or<double>("retry_interval_sec", 2.0))
         , request_timeout_sec_(
-              std::max(0.1, owner_.declare_parameter<double>("request_timeout_sec", 8.0)))
+              std::max(0.1, owner_.get_parameter_or<double>("request_timeout_sec", 8.0)))
         , max_attempt_count_(
               std::max<std::size_t>(
-                  1, static_cast<std::size_t>(owner_.declare_parameter<int>("max_retry_count", 3))))
+                  1, static_cast<std::size_t>(owner_.get_parameter_or<int>("max_retry_count", 3))))
         , health_unhealthy_dwell_sec_(
-              owner_.declare_parameter<double>("health_unhealthy_dwell_sec", 0.8))
-        , lost_cooldown_sec_(owner_.declare_parameter<double>("lost_cooldown_sec", 3.0))
+              owner_.get_parameter_or<double>("health_unhealthy_dwell_sec", 0.8))
+        , lost_cooldown_sec_(owner_.get_parameter_or<double>("lost_cooldown_sec", 3.0))
         , lost_max_consecutive_failures_(
               std::max<std::size_t>(
                   1, static_cast<std::size_t>(
-                         owner_.declare_parameter<int>("lost_max_consecutive_failures", 5))))
-        , lost_sigma_xy_base_m_(owner_.declare_parameter<double>("lost_sigma_xy_base_m", 1.0))
+                         owner_.get_parameter_or<int>("lost_max_consecutive_failures", 5))))
+        , lost_sigma_xy_base_m_(owner_.get_parameter_or<double>("lost_sigma_xy_base_m", 1.0))
         , lost_sigma_yaw_base_deg_(
-              owner_.declare_parameter<double>("lost_sigma_yaw_base_deg", 20.0))
+              owner_.get_parameter_or<double>("lost_sigma_yaw_base_deg", 20.0))
         , relocalize_client_(owner_.create_client<rmcs_msgs::srv::Relocalize>(service_name_))
         , tf_buffer_(owner_.get_clock())
         , tf_listener_(std::make_unique<tf2_ros::TransformListener>(tf_buffer_, &owner_, false)) {

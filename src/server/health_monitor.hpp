@@ -13,20 +13,20 @@
 namespace rmcs::location {
 
 struct HealthRuntimeConfig {
-    double rate_hz = 5.0;
-    int sample_points = 500;
+    double rate_hz = 2.0;
+    int sample_points = 300;
 
-    double warn_threshold_m = 0.25;
-    double lost_threshold_m = 0.45;
-    double min_inlier_ratio = 0.30;
+    double warn_threshold_m = 0.5;
+    double lost_threshold_m = 0.8;
+    double min_inlier_ratio = 0.20;
 
-    double warn_dwell_sec = 0.6;
-    double lost_dwell_sec = 1.0;
+    double warn_dwell_sec = 1.0;
+    double lost_dwell_sec = 2.0;
 
-    double recover_margin_m = 0.05;
+    double recover_margin_m = 0.1;
     double recover_dwell_sec = 2.0;
 
-    double inlier_distance_m = 0.5;
+    double inlier_distance_m = 0.8;
 };
 
 class HealthMonitor final {

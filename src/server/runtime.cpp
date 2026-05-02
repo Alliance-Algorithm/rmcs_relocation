@@ -204,7 +204,7 @@ struct RelocalizationServer::Impl {
             options);
 
         const auto rate_hz =
-            std::max(1.0, tools::sanitize_non_negative(health_runtime_config_.rate_hz, 5.0));
+            std::max(1.0, tools::sanitize_non_negative(health_runtime_config_.rate_hz, 2.0));
         const auto interval = std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::duration<double>(1.0 / rate_hz));
 

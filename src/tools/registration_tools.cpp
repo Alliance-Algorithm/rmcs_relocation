@@ -38,38 +38,38 @@ using GicpRegistrator = small_gicp::RegistrationPCL<Point, Point>;
 using PointCloudPtr = std::shared_ptr<PointCloud>;
 
 struct StageParams {
-    int coarse_iterations = 50;
-    int refine_iterations = 20;
-    int precise_iterations = 500;
+    int coarse_iterations = 12;
+    int refine_iterations = 8;
+    int precise_iterations = 20;
 
-    double yaw_window_deg = 30.0;
+    double yaw_window_deg = 15.0;
     double coarse_step_deg = 15.0;
-    double refine_step_deg = 5.0;
+    double refine_step_deg = 15.0;
     double refine_window_deg = 15.0;
 
-    std::size_t coarse_top_k = 2;
+    std::size_t coarse_top_k = 1;
     double coarse_score_threshold = std::numeric_limits<double>::infinity();
-    double max_correspondence_distance = 5.0;
-    double submap_radius_m = 10.0;
-    double max_distance_from_prior_m = 1.5;
+    double max_correspondence_distance = 0.5;
+    double submap_radius_m = 3.5;
+    double max_distance_from_prior_m = 3.0;
 
     static auto from_initial(const InitialRegistrationConfig& config) -> StageParams {
         auto stage = StageParams {};
-        stage.coarse_iterations = sanitize_iterations(config.coarse_iterations, 50);
-        stage.refine_iterations = sanitize_iterations(config.refine_iterations, 20);
-        stage.precise_iterations = sanitize_iterations(config.precise_iterations, 500);
+        stage.coarse_iterations = sanitize_iterations(config.coarse_iterations, 12);
+        stage.refine_iterations = sanitize_iterations(config.refine_iterations, 8);
+        stage.precise_iterations = sanitize_iterations(config.precise_iterations, 20);
 
         stage.yaw_window_deg = sanitize_non_negative(config.yaw_search_window_deg, 0.0);
         stage.coarse_step_deg = sanitize_step(config.coarse_yaw_step_deg, 1.0);
         stage.refine_step_deg = sanitize_step(config.refine_yaw_step_deg, 1.0);
         stage.refine_window_deg = std::max(
             sanitize_step(config.coarse_yaw_step_deg, 15.0),
-            sanitize_step(config.refine_yaw_step_deg, 5.0));
+            sanitize_step(config.refine_yaw_step_deg, 15.0));
 
         stage.coarse_top_k = std::max<std::size_t>(1, config.coarse_top_k);
-        stage.coarse_score_threshold = sanitize_non_negative(config.score_threshold, 0.01);
+        stage.coarse_score_threshold = sanitize_non_negative(config.score_threshold, 0.04);
         stage.max_correspondence_distance =
-            sanitize_non_negative(config.max_correspondence_distance_m, 5.0);
+            sanitize_non_negative(config.max_correspondence_distance_m, 0.5);
         return stage;
     }
 
@@ -91,23 +91,29 @@ struct StageParams {
         const auto max_distance_from_prior_m =
             tier == LostTier::LOCAL ? config.max_distance_from_prior_local_m
                                     : config.max_distance_from_prior_wide_m;
+        const auto default_coarse_iterations = tier == LostTier::LOCAL ? 10 : 12;
+        const auto default_refine_iterations = tier == LostTier::LOCAL ? 5 : 8;
+        const auto default_precise_iterations = tier == LostTier::LOCAL ? 15 : 20;
+        const auto default_coarse_step_deg = tier == LostTier::LOCAL ? 15.0 : 22.5;
 
-        stage.coarse_iterations = sanitize_iterations(coarse_iterations, 30);
-        stage.refine_iterations = sanitize_iterations(refine_iterations, 20);
-        stage.precise_iterations = sanitize_iterations(precise_iterations, 200);
+        stage.coarse_iterations = sanitize_iterations(coarse_iterations, default_coarse_iterations);
+        stage.refine_iterations = sanitize_iterations(refine_iterations, default_refine_iterations);
+        stage.precise_iterations =
+            sanitize_iterations(precise_iterations, default_precise_iterations);
 
         stage.yaw_window_deg = sanitize_non_negative(yaw_window_deg, 0.0);
         stage.coarse_step_deg = sanitize_step(coarse_step_deg, 1.0);
         stage.refine_step_deg = sanitize_step(config.refine_yaw_step_deg, 1.0);
         stage.refine_window_deg = std::max(
-            sanitize_step(coarse_step_deg, 10.0), sanitize_step(config.refine_yaw_step_deg, 5.0));
+            sanitize_step(coarse_step_deg, default_coarse_step_deg),
+            sanitize_step(config.refine_yaw_step_deg, 15.0));
 
         stage.coarse_top_k = std::max<std::size_t>(1, config.max_candidate_count);
         stage.coarse_score_threshold = tier == LostTier::LOCAL
             ? sanitize_non_negative(config.coarse_score_threshold_local, 0.3)
             : sanitize_non_negative(config.coarse_score_threshold_wide, 0.15);
         stage.max_correspondence_distance =
-            sanitize_non_negative(config.max_correspondence_distance_m, 2.5);
+            sanitize_non_negative(config.max_correspondence_distance_m, 0.9);
         stage.submap_radius_m = submap_radius_m;
         stage.max_distance_from_prior_m = max_distance_from_prior_m;
         return stage;
@@ -338,7 +344,7 @@ auto apply_map_consistency_filter(
     auto kdtree = pcl::KdTreeFLANN<Point> {};
     kdtree.setInputCloud(map_world_cloud);
 
-    const auto max_distance = sanitize_non_negative(map_consistency_distance_m, 0.5);
+    const auto max_distance = sanitize_non_negative(map_consistency_distance_m, 0.8);
     const auto max_distance_sq = static_cast<float>(max_distance * max_distance);
 
     auto filtered = std::make_shared<PointCloud>();
@@ -356,7 +362,7 @@ auto apply_map_consistency_filter(
 
     const auto retained_fraction = static_cast<double>(filtered->size())
         / static_cast<double>(std::max<std::size_t>(1, query_odom_cloud->size()));
-    if (retained_fraction < sanitize_non_negative(min_retained_fraction, 0.25))
+    if (retained_fraction < sanitize_non_negative(min_retained_fraction, 0.15))
         return query_odom_cloud;
 
     filtered->width = static_cast<std::uint32_t>(filtered->size());
@@ -681,8 +687,14 @@ auto run_lost(
     const auto logger = rclcpp::get_logger("rmcs_relocation");
 
     for (const auto& seed_world_to_base : seeds_world_to_base) {
+        const auto submap_radius_fallback = tier == LostTier::LOCAL ? 3.5 : 5.0;
         auto map_submap =
-            extract_submap_radius(map_kdtree, map_world_cloud, seed_world_to_base.translation(), stage.submap_radius_m, 10.0);
+            extract_submap_radius(
+                map_kdtree,
+                map_world_cloud,
+                seed_world_to_base.translation(),
+                stage.submap_radius_m,
+                submap_radius_fallback);
         if (!map_submap || map_submap->empty()) {
             RCLCPP_WARN(
                 logger,

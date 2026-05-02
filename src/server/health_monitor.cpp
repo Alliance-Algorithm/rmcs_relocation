@@ -68,20 +68,20 @@ struct HealthMonitor::Impl {
      * 在构造时调用，后续 evaluate() 不再需要重复 sanitize。
      */
     static auto sanitize_config(HealthRuntimeConfig config) -> HealthRuntimeConfig {
-        config.rate_hz = std::max(1.0, tools::sanitize_non_negative(config.rate_hz, 5.0));
-        config.sample_points = tools::sanitize_positive_int(config.sample_points, 500);
+        config.rate_hz = std::max(1.0, tools::sanitize_non_negative(config.rate_hz, 2.0));
+        config.sample_points = tools::sanitize_positive_int(config.sample_points, 300);
 
-        config.warn_threshold_m = tools::sanitize_non_negative(config.warn_threshold_m, 0.25);
-        config.lost_threshold_m = tools::sanitize_non_negative(config.lost_threshold_m, 0.45);
-        config.min_inlier_ratio = tools::sanitize_non_negative(config.min_inlier_ratio, 0.30);
+        config.warn_threshold_m = tools::sanitize_non_negative(config.warn_threshold_m, 0.5);
+        config.lost_threshold_m = tools::sanitize_non_negative(config.lost_threshold_m, 0.8);
+        config.min_inlier_ratio = tools::sanitize_non_negative(config.min_inlier_ratio, 0.20);
 
-        config.warn_dwell_sec = tools::sanitize_non_negative(config.warn_dwell_sec, 0.6);
-        config.lost_dwell_sec = tools::sanitize_non_negative(config.lost_dwell_sec, 1.0);
+        config.warn_dwell_sec = tools::sanitize_non_negative(config.warn_dwell_sec, 1.0);
+        config.lost_dwell_sec = tools::sanitize_non_negative(config.lost_dwell_sec, 2.0);
 
-        config.recover_margin_m = tools::sanitize_non_negative(config.recover_margin_m, 0.05);
+        config.recover_margin_m = tools::sanitize_non_negative(config.recover_margin_m, 0.1);
         config.recover_dwell_sec = tools::sanitize_non_negative(config.recover_dwell_sec, 2.0);
 
-        config.inlier_distance_m = tools::sanitize_non_negative(config.inlier_distance_m, 0.5);
+        config.inlier_distance_m = tools::sanitize_non_negative(config.inlier_distance_m, 0.8);
         return config;
     }
 
@@ -112,6 +112,7 @@ struct HealthMonitor::Impl {
         const pcl::KdTreeFLANN<Point>& map_kdtree, bool map_kdtree_ready,
         const Eigen::Isometry3f& world_to_odom, const rclcpp::Time& stamp)
         -> rmcs_msgs::msg::LocationHealth {
+        auto state_lock = std::scoped_lock{state_mutex_};
         auto residual_median_m = 0.0F;
         auto inlier_ratio = 0.0F;
 
@@ -291,6 +292,7 @@ struct HealthMonitor::Impl {
     std::shared_ptr<PointCloud> latest_cloud_odom_;
     bool has_latest_cloud_ = false;
 
+    mutable std::mutex state_mutex_;
     std::uint8_t state_ = rmcs_msgs::msg::LocationHealth::STATE_HEALTHY;
     std::optional<TimePoint> above_warn_since_{};
     std::optional<TimePoint> above_lost_since_{};

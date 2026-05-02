@@ -97,109 +97,109 @@ rmcs_relocation_supervisor:
 3. rmcs_msgs新增服务消息
 - 添加rmcs_msgs/service/Relocalize.srv
 ```
-  uint8 MODE_INITIAL=0
-  uint8 MODE_MANUAL=1
-  uint8 MODE_LOST=2
+uint8 MODE_INITIAL=0
+uint8 MODE_MANUAL=1
+uint8 MODE_LOST=2
 
-  uint8 mode
-  geometry_msgs/Pose initial_guess_world_base
-  string pointcloud_topic
-  float32 collect_duration_sec
-  float32 prior_sigma_xy_m
-  float32 prior_sigma_yaw_deg
-  ---
-  bool success
-  string message
-  geometry_msgs/Pose estimated_world_base
-  geometry_msgs/Transform world_to_odom
-  float32 fitness_score
-  bool within_field_bounds
-  float32 confidence
-  uint8 tier_used
+uint8 mode
+geometry_msgs/Pose initial_guess_world_base
+string pointcloud_topic
+float32 collect_duration_sec
+float32 prior_sigma_xy_m
+float32 prior_sigma_yaw_deg
+---
+bool success
+string message
+geometry_msgs/Pose estimated_world_base
+geometry_msgs/Transform world_to_odom
+float32 fitness_score
+bool within_field_bounds
+float32 confidence
+uint8 tier_used
 
 ```
 - 添加rmcs_msgs/msg/LocationHealth.msg
 ```
-  uint8 STATE_HEALTHY=0
-  uint8 STATE_WARNING=1
-  uint8 STATE_UNHEALTHY=2
+uint8 STATE_HEALTHY=0
+uint8 STATE_WARNING=1
+uint8 STATE_UNHEALTHY=2
 
-  uint8 state
-  float32 residual_median_m
-  float32 inlier_ratio
-  builtin_interfaces/Time stamp
+uint8 state
+float32 residual_median_m
+float32 inlier_ratio
+builtin_interfaces/Time stamp
 
 ```
 - CmakeLists.txt和package.xml配置
 ```cmake
-  cmake_minimum_required(VERSION 3.12)
-  project(rmcs_msgs)
+cmake_minimum_required(VERSION 3.12)
+project(rmcs_msgs)
 
-  set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
-  set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -std=c11")
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++20")
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -std=c11")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++20")
 
-  if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-    add_compile_options(-O2 -Wall -Wextra -Wpedantic)
-  endif()
+if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+  add_compile_options(-O2 -Wall -Wextra -Wpedantic)
+endif()
 
-  find_package(ament_cmake_auto REQUIRED)
-  find_package(rosidl_default_generators REQUIRED)
-  ament_auto_find_build_dependencies()
+find_package(ament_cmake_auto REQUIRED)
+find_package(rosidl_default_generators REQUIRED)
+ament_auto_find_build_dependencies()
 
-  file(
-    GLOB RMCS_MSGS_MSGS
-    RELATIVE "${CMAKE_CURRENT_SOURCE_DIR}"
-    "msg/*.msg"
-  )
-  file(
-    GLOB RMCS_MSGS_SRVS
-    RELATIVE "${CMAKE_CURRENT_SOURCE_DIR}"
-    "srv/*.srv"
-  )
+file(
+  GLOB RMCS_MSGS_MSGS
+  RELATIVE "${CMAKE_CURRENT_SOURCE_DIR}"
+  "msg/*.msg"
+)
+file(
+  GLOB RMCS_MSGS_SRVS
+  RELATIVE "${CMAKE_CURRENT_SOURCE_DIR}"
+  "srv/*.srv"
+)
 
-  rosidl_generate_interfaces(
-    ${PROJECT_NAME}
-    ${RMCS_MSGS_MSGS}
-    ${RMCS_MSGS_SRVS}
-    DEPENDENCIES
-      builtin_interfaces
-      std_msgs
-      geometry_msgs
-  )
+rosidl_generate_interfaces(
+  ${PROJECT_NAME}
+  ${RMCS_MSGS_MSGS}
+  ${RMCS_MSGS_SRVS}
+  DEPENDENCIES
+    builtin_interfaces
+    std_msgs
+    geometry_msgs
+)
 
-  include_directories(${PROJECT_SOURCE_DIR}/include)
+include_directories(${PROJECT_SOURCE_DIR}/include)
 
-  ament_export_dependencies(rosidl_default_runtime)
+ament_export_dependencies(rosidl_default_runtime)
 
-  ament_auto_package()
+ament_auto_package()
 ```
 
 ```xml
-  <?xml version="1.0"?>
-  <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
-  <package format="3">
-    <name>rmcs_msgs</name>
-    <version>0.0.0</version>
-    <description>TODO: Package description</description>
-    <maintainer email="zihanqin2048@gmail.com">Qzh</maintainer>
-    <license>TODO: License declaration</license>
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>rmcs_msgs</name>
+  <version>0.0.0</version>
+  <description>TODO: Package description</description>
+  <maintainer email="zihanqin2048@gmail.com">Qzh</maintainer>
+  <license>TODO: License declaration</license>
 
-    <buildtool_depend>ament_cmake</buildtool_depend>
-    <buildtool_depend>rosidl_default_generators</buildtool_depend>
-    
-    <member_of_group>rosidl_interface_packages</member_of_group>
-    
-    <depend>rclcpp</depend>
-    <depend>std_msgs</depend>
-    <depend>geometry_msgs</depend>
-    <depend>builtin_interfaces</depend>
-    <exec_depend>rosidl_default_runtime</exec_depend>
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <buildtool_depend>rosidl_default_generators</buildtool_depend>
+  
+  <member_of_group>rosidl_interface_packages</member_of_group>
+  
+  <depend>rclcpp</depend>
+  <depend>std_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>builtin_interfaces</depend>
+  <exec_depend>rosidl_default_runtime</exec_depend>
 
-    <export>
-      <build_type>ament_cmake</build_type>
-    </export>
-  </package>
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
 ```
 
 

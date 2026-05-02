@@ -10,36 +10,50 @@
 namespace rmcs::location {
 
 struct FieldBoundsConfig {
-    double minimum_x = -5.0;
-    double maximum_x = 25.0;
-    double minimum_y = -8.0;
-    double maximum_y = 8.0;
+    double minimum_x = -2.0;
+    double maximum_x = 7.0;
+    double minimum_y = -5.5;
+    double maximum_y = 5.5;
     double minimum_z = -0.5;
     double maximum_z = 1.0;
 };
 
 struct InitialValidationConfig {
-    double score_threshold = 0.01;
-    double initial_max_translation_error_m = 2.0;
+    double score_threshold = 0.04;
+    double initial_max_translation_error_m = 0.5;
     double initial_max_yaw_error_deg = 30.0;
 
-    FieldBoundsConfig field_bounds {};
+    FieldBoundsConfig field_bounds {
+        .minimum_x = -2.0,
+        .maximum_x = 7.0,
+        .minimum_y = -5.5,
+        .maximum_y = 5.5,
+        .minimum_z = -0.5,
+        .maximum_z = 0.5,
+    };
 };
 
 struct LostValidationConfig {
-    FieldBoundsConfig field_bounds {};
+    FieldBoundsConfig field_bounds {
+        .minimum_x = -2.0,
+        .maximum_x = 7.0,
+        .minimum_y = -5.5,
+        .maximum_y = 5.5,
+        .minimum_z = -1.0,
+        .maximum_z = 1.0,
+    };
 
-    double score_threshold_local = 0.015;
-    double score_threshold_wide = 0.03;
+    double score_threshold_local = 0.08;
+    double score_threshold_wide = 0.08;
 
-    double min_inlier_ratio_local = 0.35;
-    double min_inlier_ratio_wide = 0.25;
+    double min_inlier_ratio_local = 0.20;
+    double min_inlier_ratio_wide = 0.15;
 
-    double max_distance_from_prior_local_m = 1.5;
-    double max_distance_from_prior_wide_m = 5.0;
+    double max_distance_from_prior_local_m = 3.0;
+    double max_distance_from_prior_wide_m = 10.0;
 
-    double max_yaw_from_prior_local_deg = 20.0;
-    double max_yaw_from_prior_wide_deg = 60.0;
+    double max_yaw_from_prior_local_deg = 45.0;
+    double max_yaw_from_prior_wide_deg = 120.0;
 };
 
 struct ValidationResult {

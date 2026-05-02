@@ -11,21 +11,38 @@ namespace rmcs::location::tools {
 ParamReader::ParamReader(rclcpp::Node& node)
     : node_(node) {}
 
+namespace {
+
+template <typename T>
+auto read_or_declare_parameter(
+    rclcpp::Node& node, std::string_view key, const T& default_value) -> T {
+    const auto name = std::string(key);
+    if (node.has_parameter(name)) {
+        auto value = T {};
+        if (node.get_parameter(name, value))
+            return value;
+        return default_value;
+    }
+    return node.declare_parameter<T>(name, default_value);
+}
+
+} // namespace
+
 auto ParamReader::read_string(std::string_view key, std::string_view default_value) const
     -> std::string {
-    return node_.declare_parameter<std::string>(std::string(key), std::string(default_value));
+    return read_or_declare_parameter<std::string>(node_, key, std::string(default_value));
 }
 
 auto ParamReader::read_double(std::string_view key, double default_value) const -> double {
-    return node_.declare_parameter<double>(std::string(key), default_value);
+    return read_or_declare_parameter<double>(node_, key, default_value);
 }
 
 auto ParamReader::read_int(std::string_view key, int default_value) const -> int {
-    return node_.declare_parameter<int>(std::string(key), default_value);
+    return read_or_declare_parameter<int>(node_, key, default_value);
 }
 
 auto ParamReader::read_bool(std::string_view key, bool default_value) const -> bool {
-    return node_.declare_parameter<bool>(std::string(key), default_value);
+    return read_or_declare_parameter<bool>(node_, key, default_value);
 }
 
 auto ParamReader::read_positive_int(std::string_view key, int default_value) const -> int {
@@ -85,34 +102,34 @@ auto load_initial_runtime_config(ParamReader& reader) -> InitialRuntimeConfig {
     config.min_accumulated_points =
         reader.read_int("initial.min_accumulated_points", 2500);
     config.submap_radius_m =
-        reader.read_double("initial.submap_radius_m", 25.0);
+        reader.read_double("initial.submap_radius_m", 4.0);
     return config;
 }
 
 auto load_initial_registration_config(ParamReader& reader) -> InitialRegistrationConfig {
     auto config = InitialRegistrationConfig {};
     config.coarse_iterations =
-        reader.read_int("initial.coarse_iterations", 50);
+        reader.read_int("initial.coarse_iterations", 12);
     config.refine_iterations =
-        reader.read_int("initial.refine_iterations", 20);
+        reader.read_int("initial.refine_iterations", 8);
     config.precise_iterations =
-        reader.read_int("initial.precise_iterations", 500);
+        reader.read_int("initial.precise_iterations", 20);
     config.max_correspondence_distance_m =
-        reader.read_double("initial.max_correspondence_distance_m", 5.0);
+        reader.read_double("initial.max_correspondence_distance_m", 0.5);
     config.score_threshold =
-        reader.read_double("initial.score_threshold", 0.01);
+        reader.read_double("initial.score_threshold", 0.04);
     config.yaw_search_window_deg =
-        reader.read_double("initial.yaw_search_window_deg", 30.0);
+        reader.read_double("initial.yaw_search_window_deg", 15.0);
     config.coarse_yaw_step_deg =
         reader.read_double("initial.coarse_yaw_step_deg", 15.0);
     config.refine_yaw_step_deg =
-        reader.read_double("initial.refine_yaw_step_deg", 5.0);
+        reader.read_double("initial.refine_yaw_step_deg", 15.0);
     config.coarse_top_k =
-        static_cast<std::size_t>(reader.read_positive_int("initial.coarse_top_k", 2));
+        static_cast<std::size_t>(reader.read_positive_int("initial.coarse_top_k", 1));
     config.voxel_leaf_m =
         reader.read_double("initial.voxel_leaf_m", 0.2);
     config.outlier_mean_k =
-        reader.read_int("initial.outlier_mean_k", 50);
+        reader.read_int("initial.outlier_mean_k", 30);
     config.outlier_stddev_mul_thresh =
         reader.read_double("initial.outlier_stddev_mul_thresh", 0.5);
     return config;
@@ -124,12 +141,12 @@ auto load_initial_validation_config(
     auto config = InitialValidationConfig {};
     config.score_threshold = initial_registration_config.score_threshold;
     config.initial_max_translation_error_m =
-        reader.read_double("initial.initial_max_translation_error_m", 2.0);
+        reader.read_double("initial.initial_max_translation_error_m", 0.5);
     config.initial_max_yaw_error_deg =
         reader.read_double("initial.initial_max_yaw_error_deg", 30.0);
     config.field_bounds = reader.read_bounds(
         "initial.field_bounds",
-        FieldBoundsConfig {});
+        config.field_bounds);
     return config;
 }
 
@@ -139,63 +156,63 @@ auto load_lost_runtime_config(ParamReader& reader, const InitialRuntimeConfig& i
     config.pointcloud_topic =
         reader.read_string("lost.pointcloud_topic", initial_runtime_config.pointcloud_topic);
     config.collect_duration_sec =
-        reader.read_double("lost.collect_duration_sec", 2.0);
+        reader.read_double("lost.collect_duration_sec", 0.9);
     config.min_accumulated_points =
-        reader.read_int("lost.min_accumulated_points", 2500);
+        reader.read_int("lost.min_accumulated_points", 1500);
     return config;
 }
 
 auto load_lost_registration_config(ParamReader& reader) -> LostRegistrationConfig {
     auto config = LostRegistrationConfig {};
     config.max_candidate_count =
-        static_cast<std::size_t>(reader.read_positive_int("lost.max_candidate_count", 3));
+        static_cast<std::size_t>(reader.read_positive_int("lost.max_candidate_count", 1));
     config.local_sigma_xy_m =
-        reader.read_double("lost.local_sigma_xy_m", 1.0);
+        reader.read_double("lost.local_sigma_xy_m", 5.0);
     config.local_sigma_yaw_deg =
-        reader.read_double("lost.local_sigma_yaw_deg", 15.0);
+        reader.read_double("lost.local_sigma_yaw_deg", 60.0);
 
     config.submap_radius_local_m =
-        reader.read_double("lost.submap_radius_local_m", 10.0);
+        reader.read_double("lost.submap_radius_local_m", 3.5);
     config.submap_radius_wide_m =
-        reader.read_double("lost.submap_radius_wide_m", 18.0);
+        reader.read_double("lost.submap_radius_wide_m", 5.0);
 
     config.coarse_iterations_local =
-        reader.read_int("lost.coarse_iterations_local", 30);
+        reader.read_int("lost.coarse_iterations_local", 10);
     config.refine_iterations_local =
-        reader.read_int("lost.refine_iterations_local", 20);
+        reader.read_int("lost.refine_iterations_local", 5);
     config.precise_iterations_local =
-        reader.read_int("lost.precise_iterations_local", 200);
+        reader.read_int("lost.precise_iterations_local", 15);
 
     config.coarse_iterations_wide =
-        reader.read_int("lost.coarse_iterations_wide", 40);
+        reader.read_int("lost.coarse_iterations_wide", 12);
     config.refine_iterations_wide =
-        reader.read_int("lost.refine_iterations_wide", 20);
+        reader.read_int("lost.refine_iterations_wide", 8);
     config.precise_iterations_wide =
-        reader.read_int("lost.precise_iterations_wide", 300);
+        reader.read_int("lost.precise_iterations_wide", 20);
 
     config.max_correspondence_distance_m =
-        reader.read_double("lost.max_correspondence_distance_m", 2.5);
+        reader.read_double("lost.max_correspondence_distance_m", 0.9);
     config.coarse_score_threshold_local =
         reader.read_double("lost.coarse_score_threshold_local", 0.3);
     config.coarse_score_threshold_wide =
         reader.read_double("lost.coarse_score_threshold_wide", 0.15);
     config.local_yaw_window_deg =
-        reader.read_double("lost.local_yaw_window_deg", 20.0);
+        reader.read_double("lost.local_yaw_window_deg", 15.0);
     config.wide_yaw_window_deg =
-        reader.read_double("lost.wide_yaw_window_deg", 60.0);
+        reader.read_double("lost.wide_yaw_window_deg", 45.0);
     config.local_coarse_yaw_step_deg =
-        reader.read_double("lost.local_coarse_yaw_step_deg", 10.0);
+        reader.read_double("lost.local_coarse_yaw_step_deg", 15.0);
     config.wide_coarse_yaw_step_deg =
-        reader.read_double("lost.wide_coarse_yaw_step_deg", 15.0);
+        reader.read_double("lost.wide_coarse_yaw_step_deg", 22.5);
     config.refine_yaw_step_deg =
-        reader.read_double("lost.refine_yaw_step_deg", 5.0);
+        reader.read_double("lost.refine_yaw_step_deg", 15.0);
 
     config.enable_map_consistency_filter =
-        reader.read_bool("lost.enable_map_consistency_filter", true);
+        reader.read_bool("lost.enable_map_consistency_filter", false);
     config.map_consistency_distance_m =
-        reader.read_double("lost.map_consistency_distance_m", 0.5);
+        reader.read_double("lost.map_consistency_distance_m", 0.8);
     config.min_retained_fraction =
-        reader.read_double("lost.min_retained_fraction", 0.25);
+        reader.read_double("lost.min_retained_fraction", 0.15);
 
     config.rank_weight_inlier =
         reader.read_double("lost.rank_weight_inlier", 0.5);
@@ -206,12 +223,11 @@ auto load_lost_registration_config(ParamReader& reader) -> LostRegistrationConfi
 
 auto load_lost_validation_config(
     ParamReader& reader,
-    const InitialValidationConfig& initial_validation_config,
     LostRegistrationConfig& lost_registration_config) -> LostValidationConfig {
     const auto max_distance_from_prior_local_m =
-        reader.read_double("lost.max_distance_from_prior_local_m", 1.5);
+        reader.read_double("lost.max_distance_from_prior_local_m", 3.0);
     const auto max_distance_from_prior_wide_m =
-        reader.read_double("lost.max_distance_from_prior_wide_m", 5.0);
+        reader.read_double("lost.max_distance_from_prior_wide_m", 10.0);
 
     lost_registration_config.max_distance_from_prior_local_m = max_distance_from_prior_local_m;
     lost_registration_config.max_distance_from_prior_wide_m = max_distance_from_prior_wide_m;
@@ -219,48 +235,48 @@ auto load_lost_validation_config(
     auto config = LostValidationConfig {};
     config.field_bounds = reader.read_bounds(
         "lost.field_bounds",
-        initial_validation_config.field_bounds);
+        config.field_bounds);
     config.score_threshold_local =
-        reader.read_double("lost.score_threshold_local", 0.015);
+        reader.read_double("lost.score_threshold_local", 0.08);
     config.score_threshold_wide =
-        reader.read_double("lost.score_threshold_wide", 0.03);
+        reader.read_double("lost.score_threshold_wide", 0.08);
     lost_registration_config.score_threshold_wide = config.score_threshold_wide;
     config.min_inlier_ratio_local =
-        reader.read_double("lost.min_inlier_ratio_local", 0.35);
+        reader.read_double("lost.min_inlier_ratio_local", 0.20);
     config.min_inlier_ratio_wide =
-        reader.read_double("lost.min_inlier_ratio_wide", 0.25);
+        reader.read_double("lost.min_inlier_ratio_wide", 0.15);
     config.max_distance_from_prior_local_m =
         max_distance_from_prior_local_m;
     config.max_distance_from_prior_wide_m =
         max_distance_from_prior_wide_m;
     config.max_yaw_from_prior_local_deg =
-        reader.read_double("lost.max_yaw_from_prior_local_deg", 20.0);
+        reader.read_double("lost.max_yaw_from_prior_local_deg", 45.0);
     config.max_yaw_from_prior_wide_deg =
-        reader.read_double("lost.max_yaw_from_prior_wide_deg", 60.0);
+        reader.read_double("lost.max_yaw_from_prior_wide_deg", 120.0);
     return config;
 }
 
 auto load_health_runtime_config(ParamReader& reader) -> HealthRuntimeConfig {
     auto config = HealthRuntimeConfig {};
-    config.rate_hz = reader.read_double("health.rate_hz", 5.0);
+    config.rate_hz = reader.read_double("health.rate_hz", 2.0);
     config.sample_points =
-        reader.read_positive_int("health.sample_points", 500);
+        reader.read_positive_int("health.sample_points", 300);
     config.warn_threshold_m =
-        reader.read_double("health.warn_threshold_m", 0.25);
+        reader.read_double("health.warn_threshold_m", 0.5);
     config.lost_threshold_m =
-        reader.read_double("health.lost_threshold_m", 0.45);
+        reader.read_double("health.lost_threshold_m", 0.8);
     config.min_inlier_ratio =
-        reader.read_double("health.min_inlier_ratio", 0.30);
+        reader.read_double("health.min_inlier_ratio", 0.20);
     config.warn_dwell_sec =
-        reader.read_double("health.warn_dwell_sec", 0.6);
+        reader.read_double("health.warn_dwell_sec", 1.0);
     config.lost_dwell_sec =
-        reader.read_double("health.lost_dwell_sec", 1.0);
+        reader.read_double("health.lost_dwell_sec", 2.0);
     config.recover_margin_m =
-        reader.read_double("health.recover_margin_m", 0.05);
+        reader.read_double("health.recover_margin_m", 0.1);
     config.recover_dwell_sec =
         reader.read_double("health.recover_dwell_sec", 2.0);
     config.inlier_distance_m =
-        reader.read_double("health.inlier_distance_m", 0.5);
+        reader.read_double("health.inlier_distance_m", 0.8);
     return config;
 }
 
@@ -284,7 +300,7 @@ auto load_runtime_params(rclcpp::Node& node) -> RuntimeParamsBundle {
     params.lost_runtime_config = load_lost_runtime_config(reader, params.initial_runtime_config);
     params.lost_registration_config = load_lost_registration_config(reader);
     params.lost_validation_config = load_lost_validation_config(
-        reader, params.initial_validation_config, params.lost_registration_config);
+        reader, params.lost_registration_config);
     params.health_runtime_config = load_health_runtime_config(reader);
 
     return params;

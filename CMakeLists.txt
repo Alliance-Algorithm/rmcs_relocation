@@ -43,6 +43,9 @@ if(OpenMP_CXX_FOUND)
 endif()
 
 add_subdirectory(src/tools)
+if(BUILD_TESTING)
+  add_subdirectory(test)
+endif()
 
 add_library(rmcs-relocation_component SHARED
   src/component/supervisor.cpp
@@ -58,6 +61,7 @@ endif()
 ament_target_dependencies(
   rmcs-relocation_component
   geometry_msgs
+  pcl_conversions
   pluginlib
   rclcpp
   rmcs_executor
