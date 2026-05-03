@@ -1,6 +1,6 @@
 rmcs_relocation:
   ros__parameters:
-    map_path: "/workspaces/RMCS/rmcs_ws/src/rmcs-navigation-deps/rmcs-relocation/maps/world_map.pcd"
+    map_path: "/rmcs_install/share/rmcs-relocation/docs/20260503_031431_125.pcd"
     world_frame: "world"
     odom_frame: "odom"
     base_frame: "base_link"
@@ -30,7 +30,7 @@ rmcs_relocation:
         # GICP 最大对应距离(m)
         max_correspondence_distance_m: 0.5
         # 配准得分阈值。值越小要求越严
-        score_threshold: 0.04
+        score_threshold: 0.05
 
         # [1-3] yaw 搜索窗口（当"初值 yaw 有偏差就失败"时就调）
         # 粗搜 yaw 窗口(°)
@@ -64,8 +64,8 @@ rmcs_relocation:
           max_x: 7.0
           min_y: -5.5
           max_y: 5.5
-          min_z: -0.5
-          max_z: 0.5
+          min_z: -2.0
+          max_z: 2.0
 
 
     # lost.* — 丢失位置重定位 (MODE_LOST, mode=2)
@@ -152,32 +152,6 @@ rmcs_relocation:
           max_x: 7.0
           min_y: -5.5
           max_y: 5.5
-          min_z: -1.0
-          max_z: 1.0
-
-    # 3. health.* — 健康监控
-    health:
-        # [3-1] 基础参数
-        # 健康评估频率 (Hz)
-        rate_hz: 2.0
-        # 每次评估随机采样点数
-        sample_points: 300
-        # 判定内点的距离阈值(m)。增大 = 内点更多 = 状态偏健康
-        inlier_distance_m: 0.8
-
-        # [3-2] 阈值与驻留时间
-        # 进入 WARNING 的残差阈值(m)。正常行驶中位数残差 × 2.0~3.0
-        warn_threshold_m: 0.5
-        # 进入 UNHEALTHY 的残差阈值(m)。正常行驶中位数残差 × 3.0~4.0
-        lost_threshold_m: 0.8
-        # 内点比例下限（WARNING→UNHEALTHY 条件之一）
-        min_inlier_ratio: 0.20
-        # WARNING 驻留时间(秒)
-        warn_dwell_sec: 1.0
-        # UNHEALTHY 驻留时间(秒)
-        lost_dwell_sec: 2.0
-        # 恢复阈值 = warn_threshold - recover_margin
-        recover_margin_m: 0.1
-        # 恢复驻留时间(秒)
-        recover_dwell_sec: 2.0
+          min_z: -2.0
+          max_z: 2.0
 

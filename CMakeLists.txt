@@ -16,7 +16,6 @@ find_package(Eigen3 REQUIRED)
 find_package(PCL REQUIRED COMPONENTS common io filters registration kdtree)
 find_package(OpenMP)
 
-find_package(pluginlib REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(tf2_ros REQUIRED)
@@ -24,7 +23,6 @@ find_package(geometry_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(pcl_conversions REQUIRED)
 find_package(rmcs_msgs REQUIRED)
-find_package(rmcs_executor REQUIRED)
 
 set(RMCS_LOCATION_SMALL_GICP_INCLUDE_DIR
   "${CMAKE_CURRENT_SOURCE_DIR}/third_party/small_gicp/include")
@@ -47,32 +45,8 @@ if(BUILD_TESTING)
   add_subdirectory(test)
 endif()
 
-add_library(rmcs-relocation_component SHARED
-  src/component/supervisor.cpp
-  $<TARGET_OBJECTS:rmcs-relocation_tools_common>
-)
-target_include_directories(rmcs-relocation_component PRIVATE
-  "${CMAKE_CURRENT_SOURCE_DIR}/src"
-)
-target_compile_features(rmcs-relocation_component PUBLIC cxx_std_23)
-if(rmcs-relocation_compile_options)
-  target_compile_options(rmcs-relocation_component PRIVATE ${rmcs-relocation_compile_options})
-endif()
-ament_target_dependencies(
-  rmcs-relocation_component
-  geometry_msgs
-  pcl_conversions
-  pluginlib
-  rclcpp
-  rmcs_executor
-  rmcs_msgs
-  tf2
-  tf2_ros
-)
-
 add_executable(rmcs-relocation_server
   src/server/runtime.cpp
-  src/server/health_monitor.cpp
   src/server/collector.cpp
   src/server/validator.cpp
   src/server/main.cpp
@@ -103,10 +77,7 @@ ament_target_dependencies(
   tf2_ros
 )
 
-pluginlib_export_plugin_description_file(rmcs_executor plugins.xml)
-
 install(TARGETS
-  rmcs-relocation_component
   rmcs-relocation_server
   DESTINATION lib/${PROJECT_NAME}
 )

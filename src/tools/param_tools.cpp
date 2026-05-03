@@ -256,30 +256,6 @@ auto load_lost_validation_config(
     return config;
 }
 
-auto load_health_runtime_config(ParamReader& reader) -> HealthRuntimeConfig {
-    auto config = HealthRuntimeConfig {};
-    config.rate_hz = reader.read_double("health.rate_hz", 2.0);
-    config.sample_points =
-        reader.read_positive_int("health.sample_points", 300);
-    config.warn_threshold_m =
-        reader.read_double("health.warn_threshold_m", 0.5);
-    config.lost_threshold_m =
-        reader.read_double("health.lost_threshold_m", 0.8);
-    config.min_inlier_ratio =
-        reader.read_double("health.min_inlier_ratio", 0.20);
-    config.warn_dwell_sec =
-        reader.read_double("health.warn_dwell_sec", 1.0);
-    config.lost_dwell_sec =
-        reader.read_double("health.lost_dwell_sec", 2.0);
-    config.recover_margin_m =
-        reader.read_double("health.recover_margin_m", 0.1);
-    config.recover_dwell_sec =
-        reader.read_double("health.recover_dwell_sec", 2.0);
-    config.inlier_distance_m =
-        reader.read_double("health.inlier_distance_m", 0.8);
-    return config;
-}
-
 } // namespace
 
 auto load_runtime_params(rclcpp::Node& node) -> RuntimeParamsBundle {
@@ -301,7 +277,6 @@ auto load_runtime_params(rclcpp::Node& node) -> RuntimeParamsBundle {
     params.lost_registration_config = load_lost_registration_config(reader);
     params.lost_validation_config = load_lost_validation_config(
         reader, params.lost_registration_config);
-    params.health_runtime_config = load_health_runtime_config(reader);
 
     return params;
 }

@@ -12,7 +12,6 @@
 #include "runtime.hpp"
 
 #include "collector.hpp"
-#include "health_monitor.hpp"
 #include "tools/geometry_tools.hpp"
 #include "tools/numeric_tools.hpp"
 #include "tools/param_tools.hpp"
@@ -37,10 +36,9 @@
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <pcl/io/pcd_io.h>
 #include <pcl/kdtree/kdtree_flann.h>
+#include <pcl/common/transforms.h>
 #include <rclcpp/qos.hpp>
-#include <rmcs_msgs/msg/location_health.hpp>
 #include <rmcs_msgs/srv/relocalize.hpp>
-#include <sensor_msgs/msg/point_cloud2.hpp>
 #include <tf2/exceptions.h>
 #include <tf2/time.h>
 #include <tf2_ros/buffer.h>
@@ -53,7 +51,7 @@ namespace rmcs::location {
  * @brief 重定位服务器内部实现
  *
  * 承载完整的重定位服务生命周期：加载地图与参数、响应 INITIAL/LOST 重定位请求、
- * 维护 world->odom 变换发布、运行健康监控管线。
+ * 维护 world->odom 变换发布。
  */
 struct RelocalizationServer::Impl {
     /**
@@ -78,7 +76,7 @@ struct RelocalizationServer::Impl {
      * @brief 构造服务器内部实现
      *
      * 执行初始化序列：加载参数 → 初始化子模块 → 初始化 TF 变换缓存 → 加载地图 →
-     * 创建回调组 → 创建服务 → 启动 TF 定时发布 → 初始化健康监控。
+     * 创建回调组 → 创建服务 → 启动 TF 定时发布。
      */
     explicit Impl(RelocalizationServer& node)
         : node_(node)
@@ -106,8 +104,6 @@ struct RelocalizationServer::Impl {
             std::chrono::duration<double>(1.0 / std::max(1.0, publish_tf_rate_hz_)));
         tf_publish_timer_ =
             node_.create_wall_timer(publish_interval, [this] { publish_current_world_to_odom(); });
-
-        initialize_health_monitor();
     }
 
     //从 ROS 参数服务器一次性加载全部运行时参数
@@ -122,7 +118,6 @@ struct RelocalizationServer::Impl {
 
         initial_runtime_config_ = std::move(params.initial_runtime_config);
         lost_runtime_config_ = std::move(params.lost_runtime_config);
-        health_runtime_config_ = std::move(params.health_runtime_config);
 
         initial_registration_config_ = std::move(params.initial_registration_config);
         lost_registration_config_ = std::move(params.lost_registration_config);
@@ -131,12 +126,11 @@ struct RelocalizationServer::Impl {
         lost_validation_config_ = std::move(params.lost_validation_config);
     }
 
-    //初始化子模块：点云收集器、验证器、健康监控器
+    //初始化子模块：点云收集器、验证器
     void initialize_modules() {
         collector_ = std::make_unique<Collector>(odom_frame_);
         validator_ =
             std::make_unique<Validator>(initial_validation_config_, lost_validation_config_);
-        health_monitor_ = std::make_unique<HealthMonitor>(health_runtime_config_);
     }
 
     void initialize_transform_cache() {
@@ -175,6 +169,13 @@ struct RelocalizationServer::Impl {
             return;
         }
 
+        //地图转换 - 下移0.56米，让地图原点对齐到底盘中心
+        Eigen::Affine3f transform = Eigen::Affine3f::Identity();
+        transform.translation().z() = 0.56f;  // 下移0.56米
+        auto transformed_cloud = std::make_shared<PointCloud>();
+        pcl::transformPointCloud(*map_cloud_, *transformed_cloud, transform);
+        map_cloud_ = transformed_cloud;
+
         map_kdtree_.setInputCloud(map_cloud_);
         map_kdtree_ready_ = true;
         map_available_ = true;
@@ -182,33 +183,6 @@ struct RelocalizationServer::Impl {
         RCLCPP_INFO(
             node_.get_logger(), "map loaded: %s (%zu points)\n", map_path_.c_str(),
             map_cloud_->size());
-    }
-
-    /**
-     * @brief 初始化健康监控所需的发布器和订阅
-     *
-     * 订阅 lost 点云话题喂入 HealthMonitor，按配置频率定时评估并发布 LocationHealth。
-     */
-    void initialize_health_monitor() {
-        health_publisher_ = node_.create_publisher<rmcs_msgs::msg::LocationHealth>(
-            "/rmcs_relocation/health", rclcpp::QoS(10));
-
-        rclcpp::SubscriptionOptions options;
-        options.callback_group = pointcloud_group_;
-
-        health_pointcloud_subscription_ = node_.create_subscription<sensor_msgs::msg::PointCloud2>(
-            lost_runtime_config_.pointcloud_topic, rclcpp::SensorDataQoS(),
-            [this](const sensor_msgs::msg::PointCloud2::SharedPtr message) {
-                handle_health_pointcloud(message);
-            },
-            options);
-
-        const auto rate_hz =
-            std::max(1.0, tools::sanitize_non_negative(health_runtime_config_.rate_hz, 2.0));
-        const auto interval = std::chrono::duration_cast<std::chrono::nanoseconds>(
-            std::chrono::duration<double>(1.0 / rate_hz));
-
-        health_timer_ = node_.create_wall_timer(interval, [this] { update_health_state(); });
     }
 
     // 在开始处理重定位请求前，将响应对象重置为默认的失败状态
@@ -523,58 +497,6 @@ struct RelocalizationServer::Impl {
     }
 
     /**
-     * @brief 处理健康监控点云订阅回调
-     *
-     * 将收到的传感器点云转换为 odom 坐标系后喂入 HealthMonitor。
-     */
-    void handle_health_pointcloud(const sensor_msgs::msg::PointCloud2::SharedPtr message) {
-        if (!message)
-            return;
-
-        auto cloud = PointCloud{};
-        if (!tools::from_ros_pointcloud(*message, cloud))
-            return;
-
-        auto frame_to_odom = Eigen::Isometry3f::Identity();
-        try {
-            const auto stamp = tf_buffer_.lookupTransform(
-                odom_frame_, message->header.frame_id, tf2::TimePointZero);
-            frame_to_odom = tools::transform_to_isometry(stamp.transform);
-        } catch (const tf2::TransformException&) {
-            return;
-        }
-
-        auto transformed = PointCloud{};
-        if (!tools::transform_pointcloud(cloud, frame_to_odom, transformed))
-            return;
-
-        if (!health_monitor_)
-            return;
-
-        health_monitor_->ingest_cloud_odom(std::make_shared<PointCloud>(std::move(transformed)));
-    }
-
-    /**
-     * @brief 定时评估并发布位置健康状态
-     *
-     * 取出当前 world->odom 变换，调用 HealthMonitor::evaluate() 计算健康指标并发布。
-     */
-    void update_health_state() {
-        if (!health_monitor_)
-            return;
-
-        auto world_to_odom = Eigen::Isometry3f::Identity();
-        {
-            auto lock = std::scoped_lock{state_mutex_};
-            world_to_odom = tools::transform_to_isometry(current_world_to_odom_.transform);
-        }
-
-        const auto health =
-            health_monitor_->evaluate(map_kdtree_, map_kdtree_ready_, world_to_odom, node_.now());
-        health_publisher_->publish(health);
-    }
-
-    /**
      * @brief 将验证结果中的失败项拼接打印
      */
     static auto build_validation_failure_message(const ValidationResult& validation)
@@ -611,7 +533,6 @@ struct RelocalizationServer::Impl {
 
     InitialRuntimeConfig initial_runtime_config_{};
     LostRuntimeConfig lost_runtime_config_{};
-    HealthRuntimeConfig health_runtime_config_{};
 
     InitialRegistrationConfig initial_registration_config_{};
     LostRegistrationConfig lost_registration_config_{};
@@ -626,17 +547,12 @@ struct RelocalizationServer::Impl {
 
     std::unique_ptr<Collector> collector_;
     std::unique_ptr<Validator> validator_;
-    std::unique_ptr<HealthMonitor> health_monitor_;
 
     rclcpp::CallbackGroup::SharedPtr service_group_;
     rclcpp::CallbackGroup::SharedPtr pointcloud_group_;
     rclcpp::Service<rmcs_msgs::srv::Relocalize>::SharedPtr relocalize_service_;
 
     std::shared_ptr<rclcpp::TimerBase> tf_publish_timer_;
-    std::shared_ptr<rclcpp::TimerBase> health_timer_;
-
-    rclcpp::Publisher<rmcs_msgs::msg::LocationHealth>::SharedPtr health_publisher_;
-    rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr health_pointcloud_subscription_;
 
     mutable tf2_ros::Buffer tf_buffer_;
     std::unique_ptr<tf2_ros::TransformListener> tf_listener_;

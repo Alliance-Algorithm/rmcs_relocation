@@ -1,5 +1,0 @@
-<library path="rmcs-relocation_component">
-  <class type="rmcs::location::Supervisor" base_class_type="rmcs_executor::Component">
-    <description>Initial relocalization trigger supervisor for RMCS sentry.</description>
-  </class>
-</library>

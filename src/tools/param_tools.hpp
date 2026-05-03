@@ -6,7 +6,6 @@
 #include <geometry_msgs/msg/pose.hpp>
 #include <rclcpp/node.hpp>
 
-#include "server/health_monitor.hpp"
 #include "server/runtime.hpp"
 #include "server/validator.hpp"
 #include "tools/registration_tools.hpp"
@@ -46,7 +45,6 @@ struct RuntimeParamsBundle {
 
     InitialRuntimeConfig initial_runtime_config {};
     LostRuntimeConfig lost_runtime_config {};
-    HealthRuntimeConfig health_runtime_config {};
 
     InitialRegistrationConfig initial_registration_config {};
     LostRegistrationConfig lost_registration_config {};

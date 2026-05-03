@@ -29,26 +29,6 @@ if(TARGET test_validator)
   )
 endif()
 
-# ---- test_health_monitor ----
-ament_add_gtest(test_health_monitor
-  test_health_monitor.cpp
-  helpers.cpp
-  ../src/server/health_monitor.cpp
-  ../src/tools/numeric_tools.cpp
-)
-if(TARGET test_health_monitor)
-  rmcs_relocation_configure_test(test_health_monitor)
-  target_link_libraries(test_health_monitor
-    Eigen3::Eigen
-    ${PCL_LIBRARIES}
-  )
-  ament_target_dependencies(test_health_monitor
-    rclcpp
-    rmcs_msgs
-    sensor_msgs
-  )
-endif()
-
 # ---- test_registration ----
 ament_add_gtest(test_registration
   test_registration.cpp
