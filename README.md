@@ -1,7 +1,5 @@
 # rmcs-relocation
-
-`rmcs-relocation` 提供两部分能力：
-
+## RMCS 重定位模块，提供基于点云配准的位姿重定位服务，供导航模块在定位丢失时调用。
 - `rmcs-relocation_server`：重定位服务节点，提供 `/rmcs_relocation/relocalize`。
 - 重定位触发策略由 `rmcs-navigation` 的 Lua 决策主动调用。
 
@@ -18,7 +16,6 @@
 | 线性代数 | Eigen3 | 位姿与矩阵计算依赖。 |
 | 并行库 | OpenMP（推荐） | `small_gicp` 检测到 OpenMP 时会启用并行路径。 |
 | ROS 接口包 | `rmcs_msgs` | 不是 apt 包，需在同一工作区源码编译。 |
-| 地图文件 | `.pcd`（默认 `maps/world_map.pcd`） | 运行时由 `map_path` 参数加载。 |
 | 开发方式 | Docker devcontainer（推荐） | RMCS 项目推荐镜像：`qzhhhi/rmcs-develop`。 |
 
 ## 依赖安装（APT）
@@ -76,90 +73,9 @@ action:relocalize_initial(x, y, yaw)
 action:relocalize_local(x, y, yaw)
 action:relocalize_wide(x, y, yaw)
 action:relocalize_status()
-
--- action.lua 内已封装:
-action:do_initial() -- 固定 (0,0,0)
-action:do_local()   -- 使用 blackboard.user.{x,y,yaw}
-action:do_wide()    -- 使用 blackboard.user.{x,y,yaw}
 ```
 
-#### 参数生效优先级（重要）
-
-- `pointcloud_topic` 与 `collect_duration_sec`：请求值优先，服务端默认值（`location.yaml`）仅在请求为空/<=0 时回退。
-- 这意味着：
-  - `collect_duration_sec > 0`：`initial` 和 `lost` 都按 navigation 发出的同一值执行。
-  - `collect_duration_sec <= 0`：按模式回退到 `location.yaml`，`initial` 用 `initial.collect_duration_sec`，`lost` 用 `lost.collect_duration_sec`。
-
-#### sigma 含义（LOST 模式）
-
-- `lost_local_sigma_xy_m` / `lost_local_sigma_yaw_deg` 与 `lost_wide_sigma_xy_m` / `lost_wide_sigma_yaw_deg`，是 navigation 侧传给服务端的 `prior_sigma`（先验不确定性）。
-- `sigma` 数值越小，表示你越相信初始位姿先验；越大表示不确定性更高、搜索范围更宽。
-- 服务端 tier 判定规则：
-  - `prior_sigma_xy_m <= location.yaml: lost.local_sigma_xy_m`
-  - 且 `prior_sigma_yaw_deg <= location.yaml: lost.local_sigma_yaw_deg`
-  - 则走 `LOCAL`，否则走 `WIDE`。
-- 若请求中的 `prior_sigma <= 0`，服务端会回退为 `local_sigma + 1.0`，从而触发 `WIDE`，不是“按 local 阈值自动选 local”。
-
-#### rmcs-navigation 与非 rmcs-relocation 迁移清单
-
-1. C++ Localization 引擎改造（服务客户端）
-- 文件：`rmcs-navigation/src/cxx/util/localization/engine.hh`、`rmcs-navigation/src/cxx/util/localization/engine.cc`
-- 从旧的本地 NDT stub 改为 `rmcs_msgs::srv::Relocalize` 客户端。
-- 对外接口：
-  - `relocalize_initial(x, y, yaw)`
-  - `relocalize_local(x, y, yaw)`（使用 `lost_local_sigma_*`）
-  - `relocalize_wide(x, y, yaw)`（使用 `lost_wide_sigma_*`）
-  - `relocalize_status()`（返回最近一次请求状态）
-- 线程安全：
-  - 使用 `last_status.state` 作为单一状态源，避免并发重入；
-  - 互斥锁保护 request 状态；
-  - 请求超时（`request_timeout_sec`）自动转 `FAILED`；
-  - 使用回调更新最后结果；
-  - 析构时清理 pending request。
-
-2. Component 注入 Lua API
-- 文件：`rmcs-navigation/src/cxx/component.cc`
-- 在 `Navigation` 构造阶段读取 `localization.*` 参数并创建 `Localization`。
-- 在 `make_api_injection()` 注入：
-  - `relocalize_initial`
-  - `relocalize_local`
-  - `relocalize_wide`
-  - `relocalize_status`
-
-3. Lua API 与 Action 透传
-- 文件：`rmcs-navigation/src/lua/api.lua`、`rmcs-navigation/src/lua/action.lua`
-- `action` 层新增方法：
-  - `action:relocalize_initial(...)`
-  - `action:relocalize_local(...)`
-  - `action:relocalize_wide(...)`
-  - `action:relocalize_status()`
-  - `action:wait_relocalize_done(timeout_sec)`
-  - `action:do_initial()` / `action:do_local()` / `action:do_wide()`
-
-4. 状态语义（供 Lua 决策使用）
-- `relocalize_*` 返回值：`boolean`，表示“是否成功发起请求”。
-- `relocalize_status()` 返回表字段：
-  - `state`: `0=IDLE`, `1=IN_FLIGHT`, `2=SUCCEEDED`, `3=FAILED`
-  - `message`: 服务返回或错误信息
-  - `fitness_score`, `confidence`, `tier_used`
-
-Lua 端典型用法（先发起，再轮询状态）：
-
-```lua
-local started = action:relocalize_local(x, y, yaw)
-if started then
-  local st = action:relocalize_status()
-  if st.state == 1 then
-    -- in flight
-  elseif st.state == 2 then
-    -- succeeded, st.tier_used / st.fitness_score 可用于后续决策
-  elseif st.state == 3 then
-    -- failed, st.message 可用于日志与重试策略
-  end
-end
-```
-
-5. 非 relocation 包的接口改动（移植时别漏）
+1. 非 relocation 包的接口改动（移植时别漏）
 - `rmcs_msgs`：
   - 新增 `srv/Relocalize.srv`
   - `CMakeLists.txt` 通过 `rosidl_generate_interfaces(... "srv/*.srv")` 生成服务接口
@@ -213,10 +129,3 @@ rmcs_relocation:
   ros__parameters:
     ...
 ```
-
-## ToDo Lists
-- [x] 测试initial，lost，supervisor基础功能
-- [x] initial mode静态调参，目标5-6s内完成。
-- [x] lost mode静态调参，目标2-3s内完成。
-- [ ] initial，local实车测试调优
-- [ ] wide调参
