@@ -1,14 +1,3 @@
-/**
- * @file runtime.cpp
- * @brief 重定位服务器运行实现
- *
- * 该文件实现了重定位服务器的主要逻辑，包括参数加载、服务处理、
- * 点云收集、配准算法执行和坐标变换发布等功能。
- * 支持初始重定位和丢失重定位两种模式。
- *
- * @author RMCS Development Team
- */
-
 #include "runtime.hpp"
 
 #include "collector.hpp"
@@ -21,10 +10,13 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
+#include <iomanip>
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -47,19 +39,8 @@
 
 namespace rmcs::location {
 
-/**
- * @brief 重定位服务器内部实现
- *
- * 承载完整的重定位服务生命周期：加载地图与参数、响应 INITIAL/LOST 重定位请求、
- * 维护 world->odom 变换发布。
- */
 struct RelocalizationServer::Impl {
-    /**
-     * @brief 忙等保护 RAII 守卫
-     *
-     * 在 handle_relocalize 中标记 busy，析构时自动清除。
-     * 确保同一时刻只有一条重定位请求在处理。
-     */
+    //在 handle_relocalize 中标记 busy，析构时自动清除。确保同一时刻只有一条重定位请求在处理。
     struct BusyGuard {
         explicit BusyGuard(Impl& impl)
             : impl_(impl) {}
@@ -72,12 +53,6 @@ struct RelocalizationServer::Impl {
         Impl& impl_;
     };
 
-    /**
-     * @brief 构造服务器内部实现
-     *
-     * 执行初始化序列：加载参数 → 初始化子模块 → 初始化 TF 变换缓存 → 加载地图 →
-     * 创建回调组 → 创建服务 → 启动 TF 定时发布。
-     */
     explicit Impl(RelocalizationServer& node)
         : node_(node)
         , tf_buffer_(node.get_clock())
@@ -149,11 +124,8 @@ struct RelocalizationServer::Impl {
         current_world_to_odom_ = initial;
     }
 
-    /**
-     * @brief 加载 PCD 地图文件并构建 KD 树
-     *
-     * 支持空路径（无地图模式），此时 map_available_ = false。
-     */
+
+    //加载 PCD 地图文件并构建 KD 树
     void load_map() {
         map_cloud_ = std::make_shared<PointCloud>();
         if (map_path_.empty()) {
@@ -168,13 +140,6 @@ struct RelocalizationServer::Impl {
             RCLCPP_ERROR(node_.get_logger(), "failed to load map from %s\n", map_path_.c_str());
             return;
         }
-
-        //地图转换 - 下移0.56米，让地图原点对齐到底盘中心
-        Eigen::Affine3f transform = Eigen::Affine3f::Identity();
-        transform.translation().z() = 0.56f;  // 下移0.56米
-        auto transformed_cloud = std::make_shared<PointCloud>();
-        pcl::transformPointCloud(*map_cloud_, *transformed_cloud, transform);
-        map_cloud_ = transformed_cloud;
 
         map_kdtree_.setInputCloud(map_cloud_);
         map_kdtree_ready_ = true;
@@ -270,11 +235,7 @@ struct RelocalizationServer::Impl {
         };
     }
 
-    /**
-     * @brief 更新缓存的 world->odom 变换并立即广播
-     *
-     * 在配准成功后的最后一步调用，使外部 TF 消费者能立即看到新结果。
-     */
+    //更新 world->odom 变换
     void update_and_publish_world_to_odom(const Eigen::Isometry3f& world_to_odom) {
         auto new_transform = geometry_msgs::msg::TransformStamped{};
         new_transform.header.frame_id = world_frame_;
@@ -359,7 +320,36 @@ struct RelocalizationServer::Impl {
         response.within_field_bounds = validation.within_bounds;
 
         if (!validation.accepted) {
-            response.message = "initial registration result rejected by acceptance checks";
+            const auto estimated_yaw = std::atan2(
+                static_cast<double>(world_to_base_estimated.rotation()(1, 0)),
+                static_cast<double>(world_to_base_estimated.rotation()(0, 0)));
+            const auto guessed_yaw = std::atan2(
+                static_cast<double>(world_to_base_guess.rotation()(1, 0)),
+                static_cast<double>(world_to_base_guess.rotation()(0, 0)));
+            const auto yaw_error_deg = std::abs(
+                                           std::atan2(
+                                               std::sin(estimated_yaw - guessed_yaw),
+                                               std::cos(estimated_yaw - guessed_yaw)))
+                * 180.0 / std::numbers::pi;
+            const auto distance_error_m =
+                (world_to_base_estimated.translation() - world_to_base_guess.translation()).norm();
+
+            response.message = build_initial_validation_failure_message(
+                validation,
+                score,
+                initial_validation_config_.score_threshold,
+                distance_error_m,
+                initial_validation_config_.initial_max_translation_error_m,
+                yaw_error_deg,
+                initial_validation_config_.initial_max_yaw_error_deg);
+            RCLCPP_WARN(
+                node_.get_logger(),
+                "initial registration rejected: score=%.4f, within_bounds=%d, score_ok=%d, distance_ok=%d, yaw_ok=%d",
+                score,
+                validation.within_bounds,
+                validation.score_ok,
+                validation.distance_ok,
+                validation.yaw_ok);
             return;
         }
 
@@ -448,15 +438,6 @@ struct RelocalizationServer::Impl {
         response.message = "ok";
     }
 
-    /**
-     * @brief 处理重定位服务请求
-     *
-     * 服务处理流程：
-     * 使用RAII模式管理忙碌状态
-     *
-     * @param request 重定位服务请求
-     * @param response 重定位服务响应
-     */
     void handle_relocalize(
         const std::shared_ptr<rmcs_msgs::srv::Relocalize::Request> request,
         std::shared_ptr<rmcs_msgs::srv::Relocalize::Response> response) {
@@ -496,9 +477,7 @@ struct RelocalizationServer::Impl {
         }
     }
 
-    /**
-     * @brief 将验证结果中的失败项拼接打印
-     */
+    //打印
     static auto build_validation_failure_message(const ValidationResult& validation)
         -> std::string {
         const auto checks = std::array<std::pair<bool, std::string_view>, 5>{{
@@ -518,6 +497,40 @@ struct RelocalizationServer::Impl {
             message += reason;
             first_reason = false;
         }
+        return message;
+    }
+
+    static auto build_initial_validation_failure_message(
+        const ValidationResult& validation,
+        double score,
+        double score_threshold,
+        double distance_error_m,
+        double distance_threshold_m,
+        double yaw_error_deg,
+        double yaw_threshold_deg)
+        -> std::string {
+        const auto checks = std::array<std::pair<bool, std::string_view>, 4>{{
+            {!validation.within_bounds, "out_of_bounds"},
+            {!validation.score_ok, "score"},
+            {!validation.distance_ok, "distance"},
+            {!validation.yaw_ok, "yaw"},
+        }};
+
+        auto message = std::string{"initial registration rejected"};
+        auto first_reason = true;
+        for (const auto& [failed, reason] : checks) {
+            if (!failed)
+                continue;
+            message += first_reason ? ": " : ",";
+            message += reason;
+            first_reason = false;
+        }
+        auto details = std::ostringstream {};
+        details << std::fixed << std::setprecision(4);
+        details << " | score=" << score << "/" << score_threshold;
+        details << " distance=" << distance_error_m << "/" << distance_threshold_m;
+        details << " yaw_deg=" << yaw_error_deg << "/" << yaw_threshold_deg;
+        message += details.str();
         return message;
     }
 

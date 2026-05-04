@@ -1,12 +1,3 @@
-/**
- * @file validator.cpp
- * @brief 重定位验证器实现
- *
- * 实现了重定位结果的验证逻辑，包括初始重定位和丢失重定位的验证。
- *
- * @author RMCS Development Team
- */
-
 #include "validator.hpp"
 
 #include <algorithm>
@@ -17,18 +8,11 @@ namespace rmcs::location {
 
 namespace {
 
-/**
- * @brief 根据重定位层级选择 LOCAL 或 WIDE 对应的阈值
- */
 auto select_by_tier(LostTier tier_used, double local_value, double wide_value) -> double {
     return tier_used == LostTier::LOCAL ? local_value : wide_value;
 }
 
-/**
- * @brief "越低越好"类指标的置信度映射
- *
- * 线性缩放到 [0, 1]，值为 0 时置信度 1，值达到 threshold 时置信度 0。
- */
+
 auto confidence_lower_better(double value, double threshold) -> double {
     const auto safe_threshold = std::max(1e-6, threshold);
     if (!std::isfinite(value))
@@ -36,11 +20,6 @@ auto confidence_lower_better(double value, double threshold) -> double {
     return std::clamp(1.0 - value / safe_threshold, 0.0, 1.0);
 }
 
-/**
- * @brief "越高越好"类指标的置信度映射
- *
- * 线性缩放到 [0, 1]，值为 threshold 时置信度 1，值为 0 时置信度 0。
- */
 auto confidence_higher_better(double value, double threshold) -> double {
     const auto safe_threshold = std::max(1e-6, threshold);
     if (!std::isfinite(value))
@@ -57,32 +36,22 @@ auto confidence_higher_better(double value, double threshold) -> double {
  * 场地边界、配准分数、位置误差、姿态误差，以及丢失重定位特有的内点比例和层级自适应阈值。
  */
 struct Validator::Impl {
-    /**
-     * @brief 构造验证器内部实现，保存初始和丢失两种配置
-     */
     Impl(const InitialValidationConfig& initial_config, const LostValidationConfig& lost_config)
         : initial_config_(initial_config)
         , lost_config_(lost_config) {}
 
-    /**
-     * @brief 从旋转矩阵提取 yaw 角（弧度）
-     */
     static auto yaw_from_rotation(const Eigen::Matrix3f& rotation) -> float {
         const auto yaw = std::atan2(rotation(1, 0), rotation(0, 0));
         return yaw;
     }
 
-    /**
-     * @brief 计算两个 yaw 角之间的最短差值（弧度，±π 范围内）
-     */
     static auto wrapped_angle_delta(float current, float reference) -> float {
         return static_cast<float>(
             std::atan2(std::sin(current - reference), std::cos(current - reference)));
     }
 
-    /**
-     * @brief 检查 3D 位置是否在场地边界立方体内
-     */
+    
+    //检查 3D 位置是否在场地边界立方体内
     static auto
         is_within_field_bounds(const Eigen::Vector3f& position, const FieldBoundsConfig& bounds)
             -> bool {
@@ -111,11 +80,6 @@ struct Validator::Impl {
  * - 配准分数验证
  * - 位置误差检查
  * - 姿态误差检查
- *
- * @param world_to_base_guess 初始猜测位置
- * @param world_to_base_estimated 估计的位置
- * @param score 配准分数
- * @return ValidationResult 验证结果
  */
 auto Validator::Impl::evaluate_initial(
     const Eigen::Isometry3f& world_to_base_guess, const Eigen::Isometry3f& world_to_base_estimated,
@@ -144,27 +108,15 @@ auto Validator::Impl::evaluate_initial(
     return ValidationResult{
         .within_bounds = within_bounds,
         .score_ok = score_ok,
-        .inlier_ok = true,                    // 初始重定位不检查内点比例
+        .inlier_ok = true,                    
         .distance_ok = distance_ok,
         .yaw_ok = yaw_ok,
         .accepted = accepted,
-        .confidence = accepted ? 1.0F : 0.0F, // 初始重定位使用二元置信度
+        .confidence = accepted ? 1.0F : 0.0F, 
     };
 }
 
-/**
- * @brief 评估丢失重定位结果
- *
- * 对丢失重定位结果进行多层级验证，支持LOCAL和WIDE两种模式。
- * 使用加权置信度计算，提供更细粒度的质量评估。
- *
- * @param prior 先验信息（可能包含最后已知位置）
- * @param world_to_base_estimated 估计的位置
- * @param score 配准分数
- * @param inlier_ratio 内点比例
- * @param tier_used 使用的重定位层级
- * @return ValidationResult 验证结果
- */
+
 auto Validator::Impl::evaluate_lost(
     const LostPrior& prior, const Eigen::Isometry3f& world_to_base_estimated, double score,
     double inlier_ratio, LostTier tier_used) const -> ValidationResult {
@@ -199,7 +151,7 @@ auto Validator::Impl::evaluate_lost(
     auto distance_ok = true;
     auto yaw_ok = true;
 
-    // 如果有先验信息，检查与先验位置的偏差
+    // 检查与先验位置的偏差
     if (prior.has_prior) {
         distance_from_prior =
             (world_to_base_estimated.translation() - prior.world_to_base.translation()).norm();
