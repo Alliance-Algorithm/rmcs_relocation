@@ -1,22 +1,24 @@
 rmcs_relocation:
   ros__parameters:
-    map_path: "/tmp/point-lio/1.pcd"
-    descriptor_path: ""               # 留空则不加载，wide 走 fallback (Phase 5 后启用)
+    map_path: "/workspaces/RMCS/rmcs_ws/src/rmcs-navigation-deps/rmcs-relocation/maps/1.pcd"
+    # map_path: "/tmp/point-lio/1.pcd"
+    # 全局 SC 描述子库路径
+    descriptor_path: ""              
     world_frame: "world"
     odom_frame: "odom"
     base_frame: "base_link"
     service_name: "/rmcs_relocation/relocalize"
     publish_tf_rate_hz: 10.0
 
-    # scan_context.* — 全局 SC 描述子库（Phase 5 起在 wide 中使用）
+    # scan_context.* — 全局 SC 描述子库
     scan_context:
         num_rings: 20
         num_sectors: 60
         max_radius_m: 20.0
 
-    # diagnostics.* — 调试日志开关（默认全关）
+    # diagnostics.* — 调试日志开关（默认关）
     diagnostics:
-        log_failure_details: false   # 开启后每次失败 dispatcher 多打一行带 prior/score/conf/msg 的 warn
+        log_failure_details: true
 
     # initial.* — 初始重定位 (MODE_INITIAL=0)
     initial:
@@ -56,7 +58,7 @@ rmcs_relocation:
           max_z: 2.0
 
 
-    # local.* — 局部纠正 (MODE_LOCAL=1)，单 seed @ prior，热路径
+    # local.* — 局部纠正 (MODE_LOCAL=1)
     local:
         # [2-1] 点云采集
         pointcloud_topic: "/cloud_registered_undistort"
@@ -69,7 +71,7 @@ rmcs_relocation:
         refine_iterations: 6
         precise_iterations: 12
         max_correspondence_distance_m: 4.0
-        coarse_score_threshold: 0.5    # 仅 coarse early-break 用
+        coarse_score_threshold: 0.5    
 
         # [2-3] yaw 搜索窗口
         yaw_window_deg: 30.0
@@ -95,7 +97,7 @@ rmcs_relocation:
           max_z: 2.0
 
 
-    # wide.* — 全局兜底 (MODE_WIDE=2)，多 seed；Phase 5 将由 ScanContext 取代 seed 生成
+    # wide.* — 全局兜底 (MODE_WIDE=2)
     wide:
         # [3-1] 点云采集
         pointcloud_topic: "/cloud_registered_undistort"
