@@ -49,3 +49,20 @@ if(TARGET test_registration)
     sensor_msgs
   )
 endif()
+
+# ---- test_scan_context ----
+ament_add_gtest(test_scan_context
+  test_scan_context.cpp
+  helpers.cpp
+  ../src/tools/scan_context.cpp
+)
+if(TARGET test_scan_context)
+  rmcs_relocation_configure_test(test_scan_context)
+  target_link_libraries(test_scan_context
+    Eigen3::Eigen
+    ${PCL_LIBRARIES}
+  )
+  ament_target_dependencies(test_scan_context
+    sensor_msgs
+  )
+endif()

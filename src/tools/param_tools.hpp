@@ -9,6 +9,7 @@
 #include "server/runtime.hpp"
 #include "server/validator.hpp"
 #include "tools/registration_tools.hpp"
+#include "tools/scan_context.hpp"
 
 namespace rmcs::location::tools {
 
@@ -31,12 +32,13 @@ private:
 };
 
 auto read_pose_parameter(
-    rclcpp::Node& node,
-    const std::string& prefix,
-    const geometry_msgs::msg::Pose& defaults = geometry_msgs::msg::Pose {}) -> geometry_msgs::msg::Pose;
+    rclcpp::Node& node, const std::string& prefix,
+    const geometry_msgs::msg::Pose& defaults = geometry_msgs::msg::Pose {})
+    -> geometry_msgs::msg::Pose;
 
 struct RuntimeParamsBundle {
     std::string map_path;
+    std::string descriptor_path;
     std::string service_name;
     std::string world_frame;
     std::string odom_frame;
@@ -44,13 +46,20 @@ struct RuntimeParamsBundle {
     double publish_tf_rate_hz = 10.0;
 
     InitialRuntimeConfig initial_runtime_config {};
-    LostRuntimeConfig lost_runtime_config {};
+    LocalRuntimeConfig local_runtime_config {};
+    WideRuntimeConfig wide_runtime_config {};
 
     InitialRegistrationConfig initial_registration_config {};
-    LostRegistrationConfig lost_registration_config {};
+    LocalRegistrationConfig local_registration_config {};
+    WideRegistrationConfig wide_registration_config {};
 
     InitialValidationConfig initial_validation_config {};
-    LostValidationConfig lost_validation_config {};
+    LocalValidationConfig local_validation_config {};
+    WideValidationConfig wide_validation_config {};
+
+    ScanContextConfig scan_context_config {};
+
+    bool log_failure_details = false;
 };
 
 auto load_runtime_params(rclcpp::Node& node) -> RuntimeParamsBundle;

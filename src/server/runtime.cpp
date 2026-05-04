@@ -1,10 +1,12 @@
 #include "runtime.hpp"
 
 #include "collector.hpp"
+#include "map_descriptor_db.hpp"
 #include "tools/geometry_tools.hpp"
 #include "tools/numeric_tools.hpp"
 #include "tools/param_tools.hpp"
 #include "tools/registration_tools.hpp"
+#include "tools/scan_context.hpp"
 #include "validator.hpp"
 
 #include <algorithm>
@@ -12,11 +14,10 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
-#include <iomanip>
 #include <limits>
 #include <memory>
 #include <mutex>
-#include <sstream>
+#include <numbers>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -85,6 +86,7 @@ struct RelocalizationServer::Impl {
     void load_parameters() {
         auto params = tools::load_runtime_params(node_);
         map_path_ = std::move(params.map_path);
+        descriptor_path_ = std::move(params.descriptor_path);
         service_name_ = std::move(params.service_name);
         world_frame_ = std::move(params.world_frame);
         odom_frame_ = std::move(params.odom_frame);
@@ -92,20 +94,26 @@ struct RelocalizationServer::Impl {
         publish_tf_rate_hz_ = params.publish_tf_rate_hz;
 
         initial_runtime_config_ = std::move(params.initial_runtime_config);
-        lost_runtime_config_ = std::move(params.lost_runtime_config);
+        local_runtime_config_ = std::move(params.local_runtime_config);
+        wide_runtime_config_ = std::move(params.wide_runtime_config);
 
         initial_registration_config_ = std::move(params.initial_registration_config);
-        lost_registration_config_ = std::move(params.lost_registration_config);
+        local_registration_config_ = std::move(params.local_registration_config);
+        wide_registration_config_ = std::move(params.wide_registration_config);
 
         initial_validation_config_ = std::move(params.initial_validation_config);
-        lost_validation_config_ = std::move(params.lost_validation_config);
+        local_validation_config_ = std::move(params.local_validation_config);
+        wide_validation_config_ = std::move(params.wide_validation_config);
+
+        scan_context_config_ = params.scan_context_config;
+        log_failure_details_ = params.log_failure_details;
     }
 
     //初始化子模块：点云收集器、验证器
     void initialize_modules() {
         collector_ = std::make_unique<Collector>(odom_frame_);
-        validator_ =
-            std::make_unique<Validator>(initial_validation_config_, lost_validation_config_);
+        validator_ = std::make_unique<Validator>(
+            initial_validation_config_, local_validation_config_, wide_validation_config_);
     }
 
     void initialize_transform_cache() {
@@ -125,19 +133,19 @@ struct RelocalizationServer::Impl {
     }
 
 
-    //加载 PCD 地图文件并构建 KD 树
+    //加载 PCD 地图文件并构建 KD 树；若提供 descriptor_path 则尝试加载 SC 描述子库
     void load_map() {
         map_cloud_ = std::make_shared<PointCloud>();
         if (map_path_.empty()) {
             map_available_ = false;
             RCLCPP_WARN(
-                node_.get_logger(), "map_path is empty, relocalization will be unavailable\n");
+                node_.get_logger(), "map_path is empty, relocalization will be unavailable");
             return;
         }
 
         if (pcl::io::loadPCDFile(map_path_, *map_cloud_) != 0) {
             map_available_ = false;
-            RCLCPP_ERROR(node_.get_logger(), "failed to load map from %s\n", map_path_.c_str());
+            RCLCPP_ERROR(node_.get_logger(), "failed to load map from %s", map_path_.c_str());
             return;
         }
 
@@ -146,8 +154,43 @@ struct RelocalizationServer::Impl {
         map_available_ = true;
 
         RCLCPP_INFO(
-            node_.get_logger(), "map loaded: %s (%zu points)\n", map_path_.c_str(),
+            node_.get_logger(), "map loaded: %s (%zu points)", map_path_.c_str(),
             map_cloud_->size());
+
+        load_scan_context_db();
+    }
+
+    /**
+     * @brief 加载 SC 描述子库（.sc_desc）。失败则关闭 SC，wide 走 fallback。
+     *
+     * Phase 4：仅 bootstrap，wide handler 还不调用 db。Phase 5 接入。
+     */
+    void load_scan_context_db() {
+        scan_context_available_ = false;
+        if (descriptor_path_.empty()) {
+            RCLCPP_INFO(
+                node_.get_logger(),
+                "descriptor_path is empty, scan_context disabled (wide will use fallback seeds)");
+            return;
+        }
+
+        const auto map_hash = tools::compute_map_hash(*map_cloud_);
+        if (!map_descriptor_db_.load(descriptor_path_, scan_context_config_, map_hash)) {
+            RCLCPP_WARN(
+                node_.get_logger(),
+                "scan_context descriptor load failed (path=%s, expected_hash=0x%08x); "
+                "wide will use fallback seeds",
+                descriptor_path_.c_str(), map_hash);
+            return;
+        }
+
+        scan_context_available_ = true;
+        RCLCPP_INFO(
+            node_.get_logger(),
+            "scan_context descriptor loaded: %zu entries (rings=%d, sectors=%d, radius=%.2fm, "
+            "hash=0x%08x)",
+            map_descriptor_db_.size(), scan_context_config_.num_rings,
+            scan_context_config_.num_sectors, scan_context_config_.max_radius_m, map_hash);
     }
 
     // 在开始处理重定位请求前，将响应对象重置为默认的失败状态
@@ -157,7 +200,6 @@ struct RelocalizationServer::Impl {
         response.fitness_score = std::numeric_limits<float>::infinity();
         response.within_field_bounds = false;
         response.confidence = 0.0F;
-        response.tier_used = 255;
     }
 
     // 发布当前world->odom坐标变换到TF2
@@ -180,7 +222,7 @@ struct RelocalizationServer::Impl {
             return true;
         } catch (const tf2::TransformException& error) {
             RCLCPP_WARN(
-                node_.get_logger(), "lookup %s->%s failed: %s\n", odom_frame_.c_str(),
+                node_.get_logger(), "lookup %s->%s failed: %s", odom_frame_.c_str(),
                 base_frame_.c_str(), error.what());
             return false;
         }
@@ -334,22 +376,14 @@ struct RelocalizationServer::Impl {
             const auto distance_error_m =
                 (world_to_base_estimated.translation() - world_to_base_guess.translation()).norm();
 
-            response.message = build_initial_validation_failure_message(
-                validation,
-                score,
-                initial_validation_config_.score_threshold,
-                distance_error_m,
-                initial_validation_config_.initial_max_translation_error_m,
-                yaw_error_deg,
-                initial_validation_config_.initial_max_yaw_error_deg);
+            response.message =
+                build_validation_failure_message("initial", validation, /*include_inlier=*/false);
             RCLCPP_WARN(
                 node_.get_logger(),
-                "initial registration rejected: score=%.4f, within_bounds=%d, score_ok=%d, distance_ok=%d, yaw_ok=%d",
-                score,
-                validation.within_bounds,
-                validation.score_ok,
-                validation.distance_ok,
-                validation.yaw_ok);
+                "initial rejected: score=%.4f/%.4f, distance=%.3f/%.3f, yaw_deg=%.2f/%.2f",
+                score, initial_validation_config_.score_threshold, distance_error_m,
+                initial_validation_config_.initial_max_translation_error_m, yaw_error_deg,
+                initial_validation_config_.initial_max_yaw_error_deg);
             return;
         }
 
@@ -359,13 +393,21 @@ struct RelocalizationServer::Impl {
         response.message = "ok";
     }
 
+    /// 构造 LOCAL/WIDE 共用 prior（去 sigma 后只剩 has_prior + world_to_base + odom_to_base）
+    static auto make_prior(
+        const rmcs_msgs::srv::Relocalize::Request& request,
+        const Eigen::Isometry3f& odom_to_base_before) -> RegistrationPrior {
+        auto prior = RegistrationPrior{};
+        prior.has_prior = true;
+        prior.world_to_base = tools::pose_to_isometry(request.initial_guess_world_base);
+        prior.odom_to_base = odom_to_base_before;
+        return prior;
+    }
+
     /**
-     * @brief 处理丢失重定位（MODE_LOST）
-     *
-     * 流程：odom 查询 → 点云采集 → 构建先验信息 → 多候选种子精配（按 sigma 切 LOCAL/WIDE 档） →
-     * 结果验收 → 更新 world->odom。验收通过后返回 tier_used 和 confidence。
+     * @brief MODE_LOCAL：单 seed 围绕 prior 配准，依赖 prior 准确。热路径。
      */
-    void handle_lost_relocalize(
+    void handle_local_relocalize(
         const rmcs_msgs::srv::Relocalize::Request& request,
         rmcs_msgs::srv::Relocalize::Response& response) {
         if (!map_available_) {
@@ -375,37 +417,25 @@ struct RelocalizationServer::Impl {
 
         auto odom_to_base_before = Eigen::Isometry3f::Identity();
         if (!lookup_odom_to_base(odom_to_base_before)) {
-            response.message = "failed to query odom->base\n";
+            response.message = "failed to query odom->base";
             return;
         }
 
         const auto query_result = collect_and_validate_points(
-            request, lost_runtime_config_.pointcloud_topic,
-            lost_runtime_config_.collect_duration_sec, lost_runtime_config_.min_accumulated_points);
+            request, local_runtime_config_.pointcloud_topic,
+            local_runtime_config_.collect_duration_sec,
+            local_runtime_config_.min_accumulated_points);
         if (!query_result.ok) {
             response.message = query_result.error_message;
             return;
         }
 
-        // 构建先验信息，加入sigma值作为不确定参数
-        //sigma值的使用将在配准算法中以加权方式影响种子生成和优化过程，避免因先验信息不准确导致搜索失败
-        auto prior = LostPrior{};
-        prior.has_prior = true;
-        prior.world_to_base = tools::pose_to_isometry(request.initial_guess_world_base);
-        prior.odom_to_base = odom_to_base_before;
-        prior.sigma_xy_m = request.prior_sigma_xy_m > 0.0F
-                             ? static_cast<double>(request.prior_sigma_xy_m)
-                             : lost_registration_config_.local_sigma_xy_m + 1.0;
-        prior.sigma_yaw_deg = request.prior_sigma_yaw_deg > 0.0F
-                                ? static_cast<double>(request.prior_sigma_yaw_deg)
-                                : lost_registration_config_.local_sigma_yaw_deg + 1.0;
-
-        //点云配准
-        auto lost_result = LostResult{};
-        if (!tools::run_lost(
-                initial_registration_config_, lost_registration_config_, query_result.cloud,
-                map_cloud_, map_kdtree_, prior, lost_result)) {
-            response.message = "lost registration failed";
+        const auto prior = make_prior(request, odom_to_base_before);
+        auto registration_result = RegistrationResult{};
+        if (!tools::run_local(
+                initial_registration_config_, local_registration_config_, query_result.cloud,
+                map_cloud_, map_kdtree_, prior, registration_result)) {
+            response.message = "local registration failed";
             return;
         }
 
@@ -415,25 +445,148 @@ struct RelocalizationServer::Impl {
             return;
         }
 
-        const auto world_to_base_estimated = lost_result.world_to_odom * odom_to_base_after;
-        const auto validation = validator_->evaluate_lost(
-            prior, world_to_base_estimated, lost_result.score, lost_result.inlier_ratio,
-            lost_result.tier_used);
+        const auto world_to_base_estimated = registration_result.world_to_odom * odom_to_base_after;
+        const auto validation = validator_->evaluate_local(
+            prior, world_to_base_estimated, registration_result.score,
+            registration_result.inlier_ratio);
 
         response.estimated_world_base = tools::isometry_to_pose(world_to_base_estimated);
-        response.world_to_odom = tools::isometry_to_transform(lost_result.world_to_odom);
-        response.fitness_score = static_cast<float>(lost_result.score);
+        response.world_to_odom = tools::isometry_to_transform(registration_result.world_to_odom);
+        response.fitness_score = static_cast<float>(registration_result.score);
         response.within_field_bounds = validation.within_bounds;
         response.confidence = validation.confidence;
-        response.tier_used = static_cast<std::uint8_t>(lost_result.tier_used);
 
         if (!validation.accepted) {
-            response.message = build_validation_failure_message(validation);
+            response.message = build_validation_failure_message("local", validation, true);
             return;
         }
 
-        update_and_publish_world_to_odom(lost_result.world_to_odom);
+        update_and_publish_world_to_odom(registration_result.world_to_odom);
+        response.success = true;
+        response.message = "ok";
+    }
 
+    /// 把 SC 描述子返回的 (world_position, yaw_deg) 候选转为 world_to_base seed
+    static auto sc_match_to_seed(const ScanContextMatch& match) -> Eigen::Isometry3f {
+        const auto yaw_radian = static_cast<float>(match.yaw_deg * std::numbers::pi / 180.0);
+        auto seed = Eigen::Isometry3f::Identity();
+        seed.translation() = match.world_position;
+        seed.linear() =
+            Eigen::AngleAxisf{ yaw_radian, Eigen::Vector3f::UnitZ() }.toRotationMatrix();
+        return seed;
+    }
+
+    /// 把 odom 系点云平移到 robot-centered（odom_to_base 的位置变成原点），用于构造 SC 描述子
+    static auto translate_to_robot_frame(
+        const std::shared_ptr<PointCloud>& query_odom_cloud,
+        const Eigen::Isometry3f& odom_to_base) -> std::shared_ptr<PointCloud> {
+        auto robot_centered = std::make_shared<PointCloud>();
+        robot_centered->reserve(query_odom_cloud->size());
+        const auto offset = odom_to_base.translation();
+        for (const auto& point : query_odom_cloud->points) {
+            Point shifted{};
+            shifted.x = point.x - offset.x();
+            shifted.y = point.y - offset.y();
+            shifted.z = point.z;
+            robot_centered->push_back(shifted);
+        }
+        robot_centered->width = static_cast<std::uint32_t>(robot_centered->size());
+        robot_centered->height = 1;
+        robot_centered->is_dense = query_odom_cloud->is_dense;
+        return robot_centered;
+    }
+
+    /**
+     * @brief MODE_WIDE：全局兜底。SC 描述子库可用时走 SC top-K 主路径；不可用时走 fallback 多 seed
+     */
+    void handle_wide_relocalize(
+        const rmcs_msgs::srv::Relocalize::Request& request,
+        rmcs_msgs::srv::Relocalize::Response& response) {
+        if (!map_available_) {
+            response.message = "map unavailable";
+            return;
+        }
+
+        auto odom_to_base_before = Eigen::Isometry3f::Identity();
+        if (!lookup_odom_to_base(odom_to_base_before)) {
+            response.message = "failed to query odom->base";
+            return;
+        }
+
+        const auto query_result = collect_and_validate_points(
+            request, wide_runtime_config_.pointcloud_topic,
+            wide_runtime_config_.collect_duration_sec,
+            wide_runtime_config_.min_accumulated_points);
+        if (!query_result.ok) {
+            response.message = query_result.error_message;
+            return;
+        }
+
+        const auto prior = make_prior(request, odom_to_base_before);
+
+        // 准备 seed 列表：SC 主路径优先，不可用降级 fallback
+        auto seeds = std::vector<Eigen::Isometry3f>{};
+        const auto* path_label = "fallback";
+        if (scan_context_available_) {
+            const auto query_local =
+                translate_to_robot_frame(query_result.cloud, odom_to_base_before);
+            const auto query_descriptor =
+                tools::build_descriptor(*query_local, scan_context_config_);
+            const auto matches = map_descriptor_db_.query(
+                query_descriptor, wide_registration_config_.sc_top_k);
+            if (!matches.empty()) {
+                seeds.reserve(matches.size());
+                for (const auto& match : matches)
+                    seeds.push_back(sc_match_to_seed(match));
+                path_label = "scan_context";
+                RCLCPP_INFO(
+                    node_.get_logger(),
+                    "wide: SC returned %zu candidates (top sc_score=%.4f)", matches.size(),
+                    matches.front().sc_score);
+            } else {
+                RCLCPP_WARN(
+                    node_.get_logger(), "wide: SC query empty, falling back to multi-seed");
+            }
+        }
+        if (seeds.empty()) {
+            seeds = tools::build_wide_fallback_seeds(prior, wide_registration_config_);
+            RCLCPP_INFO(
+                node_.get_logger(), "wide: using %zu fallback seeds (path=%s)", seeds.size(),
+                path_label);
+        }
+
+        auto registration_result = RegistrationResult{};
+        if (!tools::run_wide(
+                initial_registration_config_, wide_registration_config_, query_result.cloud,
+                map_cloud_, map_kdtree_, prior, seeds, registration_result)) {
+            response.message =
+                std::string{"wide registration failed (path="} + path_label + ")";
+            return;
+        }
+
+        auto odom_to_base_after = Eigen::Isometry3f::Identity();
+        if (!lookup_odom_to_base(odom_to_base_after)) {
+            response.message = "failed to query odom->base after registration";
+            return;
+        }
+
+        const auto world_to_base_estimated = registration_result.world_to_odom * odom_to_base_after;
+        const auto validation = validator_->evaluate_wide(
+            prior, world_to_base_estimated, registration_result.score,
+            registration_result.inlier_ratio);
+
+        response.estimated_world_base = tools::isometry_to_pose(world_to_base_estimated);
+        response.world_to_odom = tools::isometry_to_transform(registration_result.world_to_odom);
+        response.fitness_score = static_cast<float>(registration_result.score);
+        response.within_field_bounds = validation.within_bounds;
+        response.confidence = validation.confidence;
+
+        if (!validation.accepted) {
+            response.message = build_validation_failure_message("wide", validation, true);
+            return;
+        }
+
+        update_and_publish_world_to_odom(registration_result.world_to_odom);
         response.success = true;
         response.message = "ok";
     }
@@ -460,83 +613,65 @@ struct RelocalizationServer::Impl {
         }
         auto busy_guard = BusyGuard{*this};
 
+        std::string_view mode_label = "unknown";
         switch (request->mode) {
         case rmcs_msgs::srv::Relocalize::Request::MODE_INITIAL:
+            mode_label = "initial";
             handle_initial_relocalize(*request, *response);
             break;
-        case rmcs_msgs::srv::Relocalize::Request::MODE_LOST:
-            handle_lost_relocalize(*request, *response);
+        case rmcs_msgs::srv::Relocalize::Request::MODE_LOCAL:
+            mode_label = "local";
+            handle_local_relocalize(*request, *response);
             break;
-        case rmcs_msgs::srv::Relocalize::Request::MODE_MANUAL:
-            RCLCPP_WARN(
-                node_.get_logger(),
-                "MODE_MANUAL is deprecated and currently routed to MODE_INITIAL behavior\n");
-            handle_initial_relocalize(*request, *response);
+        case rmcs_msgs::srv::Relocalize::Request::MODE_WIDE:
+            mode_label = "wide";
+            handle_wide_relocalize(*request, *response);
             break;
         default: response->message = "unsupported relocalization mode"; break;
         }
+        log_if_failed(mode_label, *request, *response);
     }
 
-    //打印
-    static auto build_validation_failure_message(const ValidationResult& validation)
+    /// 拼接 "<mode> registration rejected: tag1,tag2,..." —— INITIAL/LOCAL/WIDE 共用
+    static auto build_validation_failure_message(
+        std::string_view mode, const ValidationResult& validation, bool include_inlier)
         -> std::string {
-        const auto checks = std::array<std::pair<bool, std::string_view>, 5>{{
-            {!validation.within_bounds, "out_of_bounds"},
-            {!validation.score_ok, "score"},
-            {!validation.inlier_ok, "inlier"},
-            {!validation.distance_ok, "distance"},
-            {!validation.yaw_ok, "yaw"},
-        }};
-
-        auto message = std::string{"lost registration rejected"};
-        auto first_reason = true;
-        for (const auto& [failed, reason] : checks) {
-            if (!failed)
-                continue;
-            message += first_reason ? ": " : ",";
-            message += reason;
-            first_reason = false;
-        }
-        return message;
+        const auto add = [&](std::string& msg, bool failed, std::string_view tag, bool& first) {
+            if (!failed) return;
+            msg += first ? ": " : ",";
+            msg += tag;
+            first = false;
+        };
+        auto msg = std::string{mode} + " registration rejected";
+        auto first = true;
+        add(msg, !validation.within_bounds, "out_of_bounds", first);
+        add(msg, !validation.score_ok, "score", first);
+        if (include_inlier)
+            add(msg, !validation.inlier_ok, "inlier", first);
+        add(msg, !validation.distance_ok, "distance", first);
+        add(msg, !validation.yaw_ok, "yaw", first);
+        return msg;
     }
 
-    static auto build_initial_validation_failure_message(
-        const ValidationResult& validation,
-        double score,
-        double score_threshold,
-        double distance_error_m,
-        double distance_threshold_m,
-        double yaw_error_deg,
-        double yaw_threshold_deg)
-        -> std::string {
-        const auto checks = std::array<std::pair<bool, std::string_view>, 4>{{
-            {!validation.within_bounds, "out_of_bounds"},
-            {!validation.score_ok, "score"},
-            {!validation.distance_ok, "distance"},
-            {!validation.yaw_ok, "yaw"},
-        }};
-
-        auto message = std::string{"initial registration rejected"};
-        auto first_reason = true;
-        for (const auto& [failed, reason] : checks) {
-            if (!failed)
-                continue;
-            message += first_reason ? ": " : ",";
-            message += reason;
-            first_reason = false;
-        }
-        auto details = std::ostringstream {};
-        details << std::fixed << std::setprecision(4);
-        details << " | score=" << score << "/" << score_threshold;
-        details << " distance=" << distance_error_m << "/" << distance_threshold_m;
-        details << " yaw_deg=" << yaw_error_deg << "/" << yaw_threshold_deg;
-        message += details.str();
-        return message;
+    /// 失败时打一行带上下文的 warn（mode + msg + prior 位置），由 dispatcher 在 handler 返回后调用
+    void log_if_failed(
+        std::string_view mode, const rmcs_msgs::srv::Relocalize::Request& request,
+        const rmcs_msgs::srv::Relocalize::Response& response) const {
+        if (!log_failure_details_ || response.success)
+            return;
+        const auto& p = request.initial_guess_world_base.position;
+        RCLCPP_WARN(
+            node_.get_logger(),
+            "relocalize_failed mode=%.*s prior=(%.2f,%.2f,%.2f) score=%.4f conf=%.3f | %s",
+            static_cast<int>(mode.size()), mode.data(), p.x, p.y, p.z,
+            static_cast<double>(response.fitness_score),
+            static_cast<double>(response.confidence), response.message.c_str());
     }
 
     RelocalizationServer& node_;
 
     std::string map_path_;
+    std::string descriptor_path_;
     std::string service_name_;
     std::string world_frame_;
     std::string odom_frame_;
@@ -545,13 +680,22 @@ struct RelocalizationServer::Impl {
     double publish_tf_rate_hz_ = 10.0;
 
     InitialRuntimeConfig initial_runtime_config_{};
-    LostRuntimeConfig lost_runtime_config_{};
+    LocalRuntimeConfig local_runtime_config_{};
+    WideRuntimeConfig wide_runtime_config_{};
 
     InitialRegistrationConfig initial_registration_config_{};
-    LostRegistrationConfig lost_registration_config_{};
+    LocalRegistrationConfig local_registration_config_{};
+    WideRegistrationConfig wide_registration_config_{};
 
     InitialValidationConfig initial_validation_config_{};
-    LostValidationConfig lost_validation_config_{};
+    LocalValidationConfig local_validation_config_{};
+    WideValidationConfig wide_validation_config_{};
+
+    ScanContextConfig scan_context_config_{};
+    MapDescriptorDB map_descriptor_db_{};
+    bool scan_context_available_ = false;
+
+    bool log_failure_details_ = false;
 
     bool map_available_ = false;
     std::shared_ptr<PointCloud> map_cloud_;

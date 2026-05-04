@@ -30,24 +30,34 @@ auto make_initial_config() -> InitialValidationConfig {
     return config;
 }
 
-auto make_lost_config() -> LostValidationConfig {
-    auto config = LostValidationConfig{};
+auto make_local_config() -> LocalValidationConfig {
+    auto config = LocalValidationConfig{};
     config.field_bounds = FieldBoundsConfig{-2.0, 7.0, -5.5, 5.5, -0.5, 1.0};
-    config.score_threshold_local = 0.08;
-    config.score_threshold_wide = 0.08;
-    config.min_inlier_ratio_local = 0.20;
-    config.min_inlier_ratio_wide = 0.15;
-    config.max_distance_from_prior_local_m = 3.0;
-    config.max_distance_from_prior_wide_m = 10.0;
-    config.max_yaw_from_prior_local_deg = 45.0;
-    config.max_yaw_from_prior_wide_deg = 120.0;
+    config.score_threshold = 0.08;
+    config.min_inlier_ratio = 0.20;
+    config.max_distance_from_prior_m = 3.0;
+    config.max_yaw_from_prior_deg = 45.0;
     return config;
+}
+
+auto make_wide_config() -> WideValidationConfig {
+    auto config = WideValidationConfig{};
+    config.field_bounds = FieldBoundsConfig{-2.0, 7.0, -5.5, 5.5, -0.5, 1.0};
+    config.score_threshold = 0.08;
+    config.min_inlier_ratio = 0.15;
+    config.max_distance_from_prior_m = 10.0;
+    config.max_yaw_from_prior_deg = 120.0;
+    return config;
+}
+
+auto make_validator() -> Validator {
+    return Validator{make_initial_config(), make_local_config(), make_wide_config()};
 }
 
 } // namespace
 
 TEST(ValidatorTest, InitialAcceptedWhenAllPass) {
-    auto validator = Validator{make_initial_config(), make_lost_config()};
+    auto validator = make_validator();
     const auto guess = make_pose(0.0F, 0.0F, 0.0F, 0.0F);
     const auto estimated = make_pose(0.2F, 0.1F, 0.0F, 5.0F);
 
@@ -60,7 +70,7 @@ TEST(ValidatorTest, InitialAcceptedWhenAllPass) {
 }
 
 TEST(ValidatorTest, InitialRejectedWhenScoreTooHigh) {
-    auto validator = Validator{make_initial_config(), make_lost_config()};
+    auto validator = make_validator();
     const auto guess = make_identity_pose();
     const auto estimated = make_identity_pose();
 
@@ -70,7 +80,7 @@ TEST(ValidatorTest, InitialRejectedWhenScoreTooHigh) {
 }
 
 TEST(ValidatorTest, InitialRejectedWhenTranslationTooLarge) {
-    auto validator = Validator{make_initial_config(), make_lost_config()};
+    auto validator = make_validator();
     const auto guess = make_identity_pose();
     const auto estimated = make_pose(1.0F, 0.0F, 0.0F, 0.0F);
 
@@ -80,7 +90,7 @@ TEST(ValidatorTest, InitialRejectedWhenTranslationTooLarge) {
 }
 
 TEST(ValidatorTest, InitialRejectedWhenYawTooLarge) {
-    auto validator = Validator{make_initial_config(), make_lost_config()};
+    auto validator = make_validator();
     const auto guess = make_identity_pose();
     const auto estimated = make_pose(0.0F, 0.0F, 0.0F, 45.0F);
 
@@ -90,7 +100,7 @@ TEST(ValidatorTest, InitialRejectedWhenYawTooLarge) {
 }
 
 TEST(ValidatorTest, InitialRejectedWhenOutOfBounds) {
-    auto validator = Validator{make_initial_config(), make_lost_config()};
+    auto validator = make_validator();
     const auto guess = make_pose(10.0F, 10.0F, 0.0F, 0.0F);
     const auto estimated = guess;
 
@@ -99,44 +109,47 @@ TEST(ValidatorTest, InitialRejectedWhenOutOfBounds) {
     EXPECT_FALSE(result.within_bounds);
 }
 
-TEST(ValidatorTest, LostLocalAcceptedWhenAllPass) {
-    auto validator = Validator{make_initial_config(), make_lost_config()};
+TEST(ValidatorTest, LocalAcceptedWhenAllPass) {
+    auto validator = make_validator();
 
-    auto prior = LostPrior{};
+    auto prior = RegistrationPrior{};
     prior.has_prior = true;
     prior.world_to_base = make_pose(2.0F, 3.0F, 0.0F, 0.0F);
 
     const auto estimated = make_pose(2.5F, 3.2F, 0.0F, 10.0F);
-    const auto result = validator.evaluate_lost(prior, estimated, 0.05, 0.30, LostTier::LOCAL);
+    const auto result = validator.evaluate_local(prior, estimated, 0.05, 0.30);
     EXPECT_TRUE(result.accepted);
 }
 
-TEST(ValidatorTest, LostWideRejectedWhenInlierTooLow) {
-    auto validator = Validator{make_initial_config(), make_lost_config()};
+TEST(ValidatorTest, WideRejectedWhenInlierTooLow) {
+    auto validator = make_validator();
 
-    auto prior = LostPrior{};
+    auto prior = RegistrationPrior{};
     prior.has_prior = true;
     prior.world_to_base = make_pose(2.0F, 3.0F, 0.0F, 0.0F);
 
     const auto estimated = make_pose(2.1F, 3.1F, 0.0F, 5.0F);
-    const auto result = validator.evaluate_lost(prior, estimated, 0.05, 0.10, LostTier::WIDE);
+    const auto result = validator.evaluate_wide(prior, estimated, 0.05, 0.10);
     EXPECT_FALSE(result.accepted);
     EXPECT_FALSE(result.inlier_ok);
 }
 
 TEST(ValidatorTest, ConfidenceInRange) {
-    auto validator = Validator{make_initial_config(), make_lost_config()};
+    auto validator = make_validator();
 
     const auto initial_result =
         validator.evaluate_initial(make_identity_pose(), make_identity_pose(), 0.01);
     EXPECT_GE(initial_result.confidence, 0.0F);
     EXPECT_LE(initial_result.confidence, 1.0F);
 
-    auto prior = LostPrior{};
+    auto prior = RegistrationPrior{};
     prior.has_prior = true;
     prior.world_to_base = make_identity_pose();
-    const auto lost_result =
-        validator.evaluate_lost(prior, make_identity_pose(), 0.01, 0.50, LostTier::LOCAL);
-    EXPECT_GE(lost_result.confidence, 0.0F);
-    EXPECT_LE(lost_result.confidence, 1.0F);
+    const auto local_result = validator.evaluate_local(prior, make_identity_pose(), 0.01, 0.50);
+    EXPECT_GE(local_result.confidence, 0.0F);
+    EXPECT_LE(local_result.confidence, 1.0F);
+
+    const auto wide_result = validator.evaluate_wide(prior, make_identity_pose(), 0.01, 0.50);
+    EXPECT_GE(wide_result.confidence, 0.0F);
+    EXPECT_LE(wide_result.confidence, 1.0F);
 }

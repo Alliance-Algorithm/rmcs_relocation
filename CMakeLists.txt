@@ -49,6 +49,7 @@ add_executable(rmcs-relocation_server
   src/server/runtime.cpp
   src/server/collector.cpp
   src/server/validator.cpp
+  src/server/map_descriptor_db.cpp
   src/server/main.cpp
   $<TARGET_OBJECTS:rmcs-relocation_tools_common>
 )
@@ -89,6 +90,7 @@ install(DIRECTORY
 install(PROGRAMS
   scripts/pcd_publisher.py
   scripts/tf_to_pose.py
+  scripts/generate_map_descriptors.py
   DESTINATION lib/${PROJECT_NAME}
 )
 install(DIRECTORY

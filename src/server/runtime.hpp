@@ -15,10 +15,16 @@ struct InitialRuntimeConfig {
     double submap_radius_m = 4.0;
 };
 
-struct LostRuntimeConfig {
+struct LocalRuntimeConfig {
     std::string pointcloud_topic = "/cloud_registered_undistort";
-    double collect_duration_sec = 0.9;
+    double collect_duration_sec = 0.8;
     int min_accumulated_points = 1500;
+};
+
+struct WideRuntimeConfig {
+    std::string pointcloud_topic = "/cloud_registered_undistort";
+    double collect_duration_sec = 1.5;
+    int min_accumulated_points = 2000;
 };
 
 class RelocalizationServer final
