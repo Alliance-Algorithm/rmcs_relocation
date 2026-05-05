@@ -3,6 +3,7 @@ add_library(rmcs-relocation_tools_common OBJECT
   geometry_tools.cpp
   param_tools.cpp
   registration_tools.cpp
+  scan_context.cpp
 )
 target_compile_features(rmcs-relocation_tools_common PUBLIC cxx_std_23)
 if(rmcs-relocation_compile_options)

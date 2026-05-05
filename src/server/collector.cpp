@@ -1,13 +1,3 @@
-/**
- * @file collector.cpp
- * @brief 点云收集器实现
- *
- * 该组件负责从指定话题收集点云数据，并将其转换到统一的odom坐标系中。
- * 支持异步收集和坐标变换，用于重定位系统的点云预处理。
- *
- * @author RMCS Development Team
- */
-
 #include "collector.hpp"
 #include "tools/geometry_tools.hpp"
 #include "tools/numeric_tools.hpp"
@@ -39,13 +29,6 @@ struct Collector::Impl {
     explicit Impl(std::string odom_frame)
         : odom_frame_(std::move(odom_frame)) {}
 
-    /**
-     * @brief 通过 TF 查询任意坐标系到 odom 的变换
-     *
-     * @param frame_id   源坐标系名
-     * @param transform  [输出] frame -> odom 的等距变换
-     * @return 查询成功返回 true
-     */
     auto lookup_frame_to_odom(
         tf2_ros::Buffer& tf_buffer, const std::string& frame_id, Eigen::Isometry3f& transform) const
         -> bool {
@@ -66,9 +49,6 @@ struct Collector::Impl {
      * 创建临时订阅，每收到一帧点云即通过 TF 转换到 odom 坐标系并累加到累积点云中。
      * 采集时长到期后销毁订阅并返回结果。
      *
-     * @param topic_name       点云话题名
-     * @param duration_sec     采集时长（秒），最小值 0.1s
-     * @return 累积的点云（odom 坐标系），永远不为 nullptr
      */
     auto collect(
         rclcpp::Node& node, tf2_ros::Buffer& tf_buffer,
