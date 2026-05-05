@@ -8,6 +8,7 @@
 
 #include "tools/registration_tools.hpp"
 
+#include "server/validator.hpp"
 #include "tools/numeric_tools.hpp"
 
 #include <algorithm>
@@ -34,6 +35,12 @@ namespace {
 using GicpRegistrator = small_gicp::RegistrationPCL<Point, Point>;
 using PointCloudPtr = std::shared_ptr<PointCloud>;
 
+/// refine 窗口取 coarse / refine yaw step 的较大值，加大默认下限保证窗口非零
+auto refine_window(double coarse_step_deg, double refine_step_deg, double default_floor) -> double {
+    return std::max(
+        sanitize_step(coarse_step_deg, default_floor), sanitize_step(refine_step_deg, 15.0));
+}
+
 /// 多阶段 GICP 的统一参数包（INITIAL / LOCAL / WIDE 三处复用）
 struct StageParams {
     int coarse_iterations = 12;
@@ -51,68 +58,52 @@ struct StageParams {
     double submap_radius_m = 3.5;
     double max_distance_from_prior_m = 3.0;
 
-    static auto from_initial(const InitialRegistrationConfig& config) -> StageParams {
-        auto stage = StageParams {};
-        stage.coarse_iterations = sanitize_iterations(config.coarse_iterations, 12);
-        stage.refine_iterations = sanitize_iterations(config.refine_iterations, 8);
-        stage.precise_iterations = sanitize_iterations(config.precise_iterations, 20);
-
-        stage.yaw_window_deg = sanitize_non_negative(config.yaw_search_window_deg, 0.0);
-        stage.coarse_step_deg = sanitize_step(config.coarse_yaw_step_deg, 1.0);
-        stage.refine_step_deg = sanitize_step(config.refine_yaw_step_deg, 1.0);
-        stage.refine_window_deg = std::max(
-            sanitize_step(config.coarse_yaw_step_deg, 15.0),
-            sanitize_step(config.refine_yaw_step_deg, 15.0));
-
-        stage.coarse_top_k = std::max<std::size_t>(1, config.coarse_top_k);
-        stage.coarse_score_threshold = sanitize_non_negative(config.score_threshold, 0.04);
-        stage.max_correspondence_distance =
-            sanitize_non_negative(config.max_correspondence_distance_m, 0.5);
-        return stage;
+    static auto from_initial(const InitialRegistrationConfig& c) -> StageParams {
+        return StageParams{
+            .coarse_iterations           = sanitize_iterations(c.coarse_iterations, 12),
+            .refine_iterations           = sanitize_iterations(c.refine_iterations, 8),
+            .precise_iterations          = sanitize_iterations(c.precise_iterations, 20),
+            .yaw_window_deg              = sanitize_non_negative(c.yaw_search_window_deg, 0.0),
+            .coarse_step_deg             = sanitize_step(c.coarse_yaw_step_deg, 1.0),
+            .refine_step_deg             = sanitize_step(c.refine_yaw_step_deg, 1.0),
+            .refine_window_deg           = refine_window(c.coarse_yaw_step_deg, c.refine_yaw_step_deg, 15.0),
+            .coarse_top_k                = std::max<std::size_t>(1, c.coarse_top_k),
+            .coarse_score_threshold      = sanitize_non_negative(c.score_threshold, 0.04),
+            .max_correspondence_distance = sanitize_non_negative(c.max_correspondence_distance_m, 0.5),
+        };
     }
 
-    static auto from_local(const LocalRegistrationConfig& config) -> StageParams {
-        auto stage = StageParams {};
-        stage.coarse_iterations = sanitize_iterations(config.coarse_iterations, 10);
-        stage.refine_iterations = sanitize_iterations(config.refine_iterations, 5);
-        stage.precise_iterations = sanitize_iterations(config.precise_iterations, 15);
-
-        stage.yaw_window_deg = sanitize_non_negative(config.yaw_window_deg, 0.0);
-        stage.coarse_step_deg = sanitize_step(config.coarse_yaw_step_deg, 1.0);
-        stage.refine_step_deg = sanitize_step(config.refine_yaw_step_deg, 1.0);
-        stage.refine_window_deg = std::max(
-            sanitize_step(config.coarse_yaw_step_deg, 15.0),
-            sanitize_step(config.refine_yaw_step_deg, 15.0));
-
-        stage.coarse_top_k = 1;
-        stage.coarse_score_threshold = sanitize_non_negative(config.coarse_score_threshold, 0.3);
-        stage.max_correspondence_distance =
-            sanitize_non_negative(config.max_correspondence_distance_m, 0.9);
-        stage.submap_radius_m = sanitize_non_negative(config.submap_radius_m, 3.5);
-        return stage;
+    static auto from_local(const LocalRegistrationConfig& c) -> StageParams {
+        return StageParams{
+            .coarse_iterations           = sanitize_iterations(c.coarse_iterations, 10),
+            .refine_iterations           = sanitize_iterations(c.refine_iterations, 5),
+            .precise_iterations          = sanitize_iterations(c.precise_iterations, 15),
+            .yaw_window_deg              = sanitize_non_negative(c.yaw_window_deg, 0.0),
+            .coarse_step_deg             = sanitize_step(c.coarse_yaw_step_deg, 1.0),
+            .refine_step_deg             = sanitize_step(c.refine_yaw_step_deg, 1.0),
+            .refine_window_deg           = refine_window(c.coarse_yaw_step_deg, c.refine_yaw_step_deg, 15.0),
+            .coarse_top_k                = 1,
+            .coarse_score_threshold      = sanitize_non_negative(c.coarse_score_threshold, 0.3),
+            .max_correspondence_distance = sanitize_non_negative(c.max_correspondence_distance_m, 0.9),
+            .submap_radius_m             = sanitize_non_negative(c.submap_radius_m, 3.5),
+        };
     }
 
-    static auto from_wide(const WideRegistrationConfig& config) -> StageParams {
-        auto stage = StageParams {};
-        stage.coarse_iterations = sanitize_iterations(config.coarse_iterations, 12);
-        stage.refine_iterations = sanitize_iterations(config.refine_iterations, 8);
-        stage.precise_iterations = sanitize_iterations(config.precise_iterations, 20);
-
-        stage.yaw_window_deg = sanitize_non_negative(config.yaw_window_deg, 0.0);
-        stage.coarse_step_deg = sanitize_step(config.coarse_yaw_step_deg, 1.0);
-        stage.refine_step_deg = sanitize_step(config.refine_yaw_step_deg, 1.0);
-        stage.refine_window_deg = std::max(
-            sanitize_step(config.coarse_yaw_step_deg, 22.5),
-            sanitize_step(config.refine_yaw_step_deg, 15.0));
-
-        stage.coarse_top_k = std::max<std::size_t>(1, config.max_candidate_count);
-        stage.coarse_score_threshold = sanitize_non_negative(config.coarse_score_threshold, 0.15);
-        stage.max_correspondence_distance =
-            sanitize_non_negative(config.max_correspondence_distance_m, 0.9);
-        stage.submap_radius_m = sanitize_non_negative(config.submap_radius_m, 5.0);
-        stage.max_distance_from_prior_m =
-            sanitize_non_negative(config.max_distance_from_prior_m, 10.0);
-        return stage;
+    static auto from_wide(const WideRegistrationConfig& c) -> StageParams {
+        return StageParams{
+            .coarse_iterations           = sanitize_iterations(c.coarse_iterations, 12),
+            .refine_iterations           = sanitize_iterations(c.refine_iterations, 8),
+            .precise_iterations          = sanitize_iterations(c.precise_iterations, 20),
+            .yaw_window_deg              = sanitize_non_negative(c.yaw_window_deg, 0.0),
+            .coarse_step_deg             = sanitize_step(c.coarse_yaw_step_deg, 1.0),
+            .refine_step_deg             = sanitize_step(c.refine_yaw_step_deg, 1.0),
+            .refine_window_deg           = refine_window(c.coarse_yaw_step_deg, c.refine_yaw_step_deg, 22.5),
+            .coarse_top_k                = std::max<std::size_t>(1, c.max_candidate_count),
+            .coarse_score_threshold      = sanitize_non_negative(c.coarse_score_threshold, 0.15),
+            .max_correspondence_distance = sanitize_non_negative(c.max_correspondence_distance_m, 0.9),
+            .submap_radius_m             = sanitize_non_negative(c.submap_radius_m, 5.0),
+            .max_distance_from_prior_m   = sanitize_non_negative(c.max_distance_from_prior_m, 10.0),
+        };
     }
 };
 
@@ -282,6 +273,16 @@ auto preprocess_cloud(
     return filtered;
 }
 
+/// 三个 run_* 入口共享：voxel + outlier 滤波 → 空检查。空时返回 nullptr，调用方应直接 false。
+auto prepare_filtered_query(
+    const PointCloudPtr& query_odom_cloud, const InitialRegistrationConfig& initial_config)
+    -> PointCloudPtr {
+    auto filtered = preprocess_cloud(query_odom_cloud, initial_config, true);
+    if (!filtered || filtered->empty())
+        return nullptr;
+    return filtered;
+}
+
 auto apply_map_consistency_filter(
     const PointCloudPtr& query_odom_cloud, const PointCloudPtr& map_world_cloud,
     const Eigen::Isometry3f& world_to_odom_guess, double map_consistency_distance_m,
@@ -323,8 +324,6 @@ auto apply_map_consistency_filter(
     filtered->is_dense = query_odom_cloud->is_dense;
     return filtered;
 }
-
-// build_wide_fallback_seeds 在文件末尾以公共 API 提供（per scancontext_plan.md §3.3）。
 
 class MultiStageGicp {
     StageParams params_;
@@ -519,9 +518,9 @@ auto run_initial(
     const std::shared_ptr<PointCloud>& map_world_cloud,
     const Eigen::Isometry3f& world_to_odom_guess, Eigen::Isometry3f& world_to_odom_result,
     double& score) -> bool {
-    auto filtered_query = preprocess_cloud(query_odom_cloud, initial_config, true);
+    auto filtered_query = prepare_filtered_query(query_odom_cloud, initial_config);
     auto filtered_map = preprocess_cloud(map_world_cloud, initial_config, true);
-    if (filtered_query->empty() || filtered_map->empty())
+    if (!filtered_query || !filtered_map || filtered_map->empty())
         return false;
 
     auto pipeline =
@@ -544,8 +543,8 @@ auto run_local(
     if (!prior.has_prior)
         return false;
 
-    auto filtered_query = preprocess_cloud(query_odom_cloud, initial_config, true);
-    if (!filtered_query || filtered_query->empty())
+    auto filtered_query = prepare_filtered_query(query_odom_cloud, initial_config);
+    if (!filtered_query)
         return false;
 
     const auto stage = StageParams::from_local(local_config);
@@ -571,13 +570,11 @@ auto run_wide(
     const RegistrationPrior& prior, const std::vector<Eigen::Isometry3f>& seeds_world_to_base,
     RegistrationResult& result) -> bool {
     result = RegistrationResult {};
-    if (!prior.has_prior)
-        return false;
     if (seeds_world_to_base.empty())
         return false;
 
-    auto filtered_query = preprocess_cloud(query_odom_cloud, initial_config, true);
-    if (!filtered_query || filtered_query->empty())
+    auto filtered_query = prepare_filtered_query(query_odom_cloud, initial_config);
+    if (!filtered_query)
         return false;
 
     const auto stage = StageParams::from_wide(wide_config);
@@ -607,41 +604,6 @@ auto run_wide(
         .inlier_ratio = candidates.front().inlier_ratio,
     };
     return std::isfinite(result.score);
-}
-
-auto build_wide_fallback_seeds(
-    const RegistrationPrior& prior, const WideRegistrationConfig& wide_config)
-    -> std::vector<Eigen::Isometry3f> {
-    const auto offset =
-        std::clamp(sanitize_non_negative(wide_config.seed_offset_m, 1.5), 0.5, 10.0);
-    const auto position_offsets = std::array<Eigen::Vector3f, 5>{ {
-        { 0.0F, 0.0F, 0.0F },
-        { static_cast<float>(offset), 0.0F, 0.0F },
-        { static_cast<float>(-offset), 0.0F, 0.0F },
-        { 0.0F, static_cast<float>(offset), 0.0F },
-        { 0.0F, static_cast<float>(-offset), 0.0F },
-    } };
-    constexpr auto yaw_offsets_deg = std::array<double, 8>{ {
-        0.0, 45.0, -45.0, 90.0, -90.0, 135.0, -135.0, 180.0,
-    } };
-
-    auto seeds = std::vector<Eigen::Isometry3f> {};
-    seeds.reserve(position_offsets.size() * yaw_offsets_deg.size());
-
-    const auto base_rotation = Eigen::Quaternionf { prior.world_to_base.rotation() };
-    for (const auto& position_offset : position_offsets) {
-        for (const auto yaw_offset_deg : yaw_offsets_deg) {
-            const auto yaw_radian = static_cast<float>(yaw_offset_deg * std::numbers::pi / 180.0);
-            const auto yaw_rotation =
-                Eigen::AngleAxisf { yaw_radian, Eigen::Vector3f::UnitZ() };
-
-            auto seed = Eigen::Isometry3f::Identity();
-            seed.translation() = prior.world_to_base.translation() + position_offset;
-            seed.linear() = (yaw_rotation * base_rotation).normalized().toRotationMatrix();
-            seeds.push_back(seed);
-        }
-    }
-    return seeds;
 }
 
 } // namespace rmcs::location::tools

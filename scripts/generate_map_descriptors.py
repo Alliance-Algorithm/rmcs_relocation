@@ -157,7 +157,10 @@ def build_descriptor(
 
 
 def grid_centers(points: np.ndarray, step: float, padding_ratio: float = 0.0) -> np.ndarray:
-    """在 XY 平面包围盒内按 step 切网格，返回 (M, 3) 中心点（z=0）。"""
+    """在 XY 平面包围盒内按 step 切网格，返回 (M, 3) 中心点（z=0）。
+
+    起点对齐到 step 的整数倍，使 (0,0) 一定落在 grid 上。
+    """
     if step <= 0.0:
         raise ValueError("grid step must be > 0")
     xy_min = points[:, :2].min(axis=0)
@@ -167,8 +170,10 @@ def grid_centers(points: np.ndarray, step: float, padding_ratio: float = 0.0) ->
     xy_min = xy_min - margin
     xy_max = xy_max + margin
 
-    xs = np.arange(xy_min[0], xy_max[0] + 1e-6, step, dtype=np.float32)
-    ys = np.arange(xy_min[1], xy_max[1] + 1e-6, step, dtype=np.float32)
+    x_start = float(np.floor(float(xy_min[0]) / step) * step)
+    y_start = float(np.floor(float(xy_min[1]) / step) * step)
+    xs = np.arange(x_start, float(xy_max[0]) + 1e-6, step, dtype=np.float32)
+    ys = np.arange(y_start, float(xy_max[1]) + 1e-6, step, dtype=np.float32)
     xx, yy = np.meshgrid(xs, ys, indexing="xy")
     centers = np.stack([xx.ravel(), yy.ravel(), np.zeros_like(xx.ravel())], axis=1)
     return centers.astype(np.float32)

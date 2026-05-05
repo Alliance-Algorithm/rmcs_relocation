@@ -166,6 +166,9 @@ auto load_local_registration_config(ParamReader& reader) -> LocalRegistrationCon
     config.map_consistency_distance_m =
         reader.read_double("local.map_consistency_distance_m", 0.8);
     config.min_retained_fraction = reader.read_double("local.min_retained_fraction", 0.15);
+
+    config.sc_top_k =
+        static_cast<std::size_t>(reader.read_positive_int("local.sc_top_k", 2));
     return config;
 }
 
@@ -204,9 +207,12 @@ auto load_wide_registration_config(ParamReader& reader) -> WideRegistrationConfi
     config.refine_yaw_step_deg = reader.read_double("wide.refine_yaw_step_deg", 12.0);
 
     config.submap_radius_m = reader.read_double("wide.submap_radius_m", 6.0);
-    config.seed_offset_m = reader.read_double("wide.seed_offset_m", 1.5);
     config.sc_top_k =
         static_cast<std::size_t>(reader.read_positive_int("wide.sc_top_k", 5));
+    config.fallback_position_radius_m =
+        reader.read_double("wide.fallback_position_radius_m", 3.5);
+    config.fallback_yaw_count =
+        reader.read_positive_int("wide.fallback_yaw_count", 8);
 
     config.enable_map_consistency_filter =
         reader.read_bool("wide.enable_map_consistency_filter", false);

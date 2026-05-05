@@ -11,8 +11,8 @@ RMCS 重定位模块，提供基于点云配准的位姿重定位服务。
 | 模式 | 数值 | 用途 | 实现 | 依赖 prior |
 | --- | --- | --- | --- | --- |
 | `MODE_INITIAL` | 0 | 开局调用一次 | yaw 扫描 + 多阶段 GICP | 是 |
-| `MODE_LOCAL` | 1 | 局部纠正，热路径 | 单 seed @ prior + 多阶段 GICP | 是（强） |
-| `MODE_WIDE` | 2 | 全局兜底 | ScanContext top-K → seed；SC 不可用降级 5×8 = 40 fallback seed | 否（SC 路径） |
+| `MODE_LOCAL` | 1 | 局部纠正，热路径 | ScanContext top-K seed（默认 2）+ 多阶段 GICP + 早停 | prior 仅用于验收约束 |
+| `MODE_WIDE` | 2 | 全局兜底 | ScanContext top-K → seed；SC 不可用降级 5 位置 × 8 yaw fallback seed | 否（SC 路径） |
 
 ## 环境要求
 
@@ -25,7 +25,6 @@ RMCS 重定位模块，提供基于点云配准的位姿重定位服务。
 | 线性代数 | Eigen3 | 位姿与矩阵计算 |
 | 并行库 | OpenMP | `small_gicp` 检测到时启用并行 |
 | ROS 接口包 | `rmcs_msgs` | 同一 workspace 源码编译 |
-| 离线 SC 生成（可选） | Python 3 + numpy（可选 open3d） | `scripts/generate_map_descriptors.py` 用 |
 
 ## 依赖安装（APT）
 
@@ -42,11 +41,6 @@ sudo apt install -y \
   ros-jazzy-launch ros-jazzy-launch-ros
 ```
 
-可选（启用 ScanContext 时离线生成描述子用）：
-
-```bash
-pip3 install numpy open3d   # 二进制 PCD 需要 open3d；ASCII PCD 仅 numpy
-```
 
 ## 服务接口（`rmcs_msgs/srv/Relocalize.srv`）
 
@@ -73,12 +67,12 @@ float32 confidence
 
 ```lua
 -- 阻塞等待结果，返回 (ok: bool, status: table | nil)
-action:relocalize("initial", x, y, yaw, timeout_sec)
-action:relocalize("local_", x, y, yaw, timeout_sec)
-action:relocalize("wide",   x, y, yaw, timeout_sec)
+action:relocalize("initial", x, y, yaw)
+action:relocalize("local_", x, y, yaw)
+action:relocalize_wide(x, y, yaw)
 
--- LIO/TF 兜底：blackboard.user.x/y/yaw 任一为 NaN 则降级到 wide+原点（timeout × 2）
-action:try_relocalize_with_fallback("local_", timeout_sec)
+-- local 失败自动降级 wide；LIO/TF 丢失时直接 wide+原点
+action:try_relocalize_local_then_wide()
 
 -- 非阻塞状态查询
 local st = action:relocalize_status()
@@ -95,11 +89,7 @@ local st = action:relocalize_status()
 rmcs_navigation:
   ros__parameters:
     endpoint: "main"
-    localization:
-      service_name: "/rmcs_relocation/relocalize"
-      pointcloud_topic: "/cloud_registered_undistort"
-      collect_duration_sec: 0.0     # 0 = 用 server 端各 mode 的默认值
-      request_timeout_sec: 15.0
+    enable_relocalization: true
 ```
 
 ## 构建
@@ -127,7 +117,7 @@ ros2 run tf2_ros tf2_echo world odom
 
 ## ScanContext 启用
 
-WIDE 默认走 fallback（5 位置 × 8 yaw = 40 seed）。要让 wide 用真正的全局识别，需要离线生成描述子库：
+WIDE 默认走 fallback（5 位置 × 8 yaw）。要让 wide 用真正的全局识别，需要离线生成描述子库：
 
 ### 1) 生成 `.sc_desc`
 
@@ -151,15 +141,6 @@ scan_context:
     max_radius_m: 20.0    # 必须与 generator 完全一致，否则启动时 hash mismatch
 ```
 
-### 3) 启动确认日志
-
-| 日志 | 含义 |
-| --- | --- |
-| `scan_context descriptor loaded: K entries (...)` | SC 启用，wide 走 SC 主路径 |
-| `descriptor_path is empty, scan_context disabled` | yaml 默认配置，wide 走 fallback |
-| `scan_context descriptor load failed (...)` | 文件缺失/坏文件/版本不匹配/hash 不匹配 → wide 自动 fallback |
-| `wide: SC returned K candidates` | 单次 wide 调用走了 SC 主路径 |
-| `wide: SC query empty, falling back to multi-seed` | 单次 SC 匹配失败，本次降级 |
 
 ## 调试
 
@@ -178,7 +159,7 @@ diagnostics:
 | `src/server/collector.*` | 点云采集与坐标系转换（输入 topic，输出 odom 点云） |
 | `src/server/validator.*` | 三 mode 验收：边界、score、inlier、prior 距离 / yaw |
 | `src/server/map_descriptor_db.*` | `.sc_desc` 加载 + map_hash 校验 + top-K 查询 |
-| `src/tools/registration_tools.*` | `run_initial / run_local / run_wide` 配准核心 + `build_wide_fallback_seeds` |
+| `src/tools/registration_tools.*` | `run_initial / run_local / run_wide` 配准核心 |
 | `src/tools/scan_context.*` | SC 描述子构造 + 旋转不变匹配 + map hash（FNV-1a，与 Python 同构） |
 | `src/tools/param_tools.*` | yaml 参数加载 |
 | `scripts/generate_map_descriptors.py` | 离线生成 `.sc_desc`（与 C++ 字节序、采样规则、哈希严格同构） |
@@ -200,15 +181,3 @@ rmcs_relocation:
       log_failure_details: false
 
 ```
-
-## 移植/集成 checklist
-
-- `rmcs_msgs`：`srv/Relocalize.srv`（已有），`CMakeLists.txt` 通过 `rosidl_generate_interfaces` 生成接口
-- `rmcs-navigation/package.xml`：依赖 `rmcs_msgs` 与 `rmcs-relocation`
-- `rmcs_bringup/config/{navigation,sentry}.yaml`：`rmcs_navigation.ros__parameters.localization.*`
-- 部署目录：`maps/*.pcd`（必需）+ 可选的 `maps/*.sc_desc`
-
-## 已知限制
-
-- 帧内 ~11° smear @ 2 rad/s：源于 point_lio 的 `IMU_Processing` 未做 per-point deskew + `pointBodyToWorld` 用单一 scan-end pose；本仓不涉及，需 fork upstream 解决
-- ScanContext 在几何对称环境（长走廊、空旷场地）会出双峰候选，依赖 `sc_top_k > 1` + GICP fitness ranking 收敛到正确解

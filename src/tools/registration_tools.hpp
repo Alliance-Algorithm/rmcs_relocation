@@ -52,10 +52,13 @@ struct LocalRegistrationConfig {
     bool enable_map_consistency_filter = false;
     double map_consistency_distance_m = 0.8;
     double min_retained_fraction = 0.15;
+
+    /// 镜像对称场地兜底；早停：seed 1 通过即返回，seed 2 仅当 seed 1 失败时才跑
+    std::size_t sc_top_k = 2;
 };
 
 /**
- * @brief WIDE 模式配准参数（多 seed，全局兜底；Phase 5 将由 ScanContext 取代 seed 生成）
+ * @brief WIDE 模式配准参数（多 seed，全局兜底；seed 来源由 runtime 决定）
  */
 struct WideRegistrationConfig {
     int coarse_iterations = 15;
@@ -75,11 +78,13 @@ struct WideRegistrationConfig {
     double map_consistency_distance_m = 0.8;
     double min_retained_fraction = 0.15;
 
-    /// fallback seed 生成的位置偏移半径（仅在 ScanContext 不可用时用）
-    double seed_offset_m = 1.5;
-
     /// 从 ScanContext 描述子库取前 sc_top_k 个候选作为 wide handler 的 seed
     std::size_t sc_top_k = 5;
+
+    /// fallback 路径（SC 不可用 / 无匹配时）：以中心 + ±radius/0/0 + 0/±radius/0 共 5 个位置
+    /// 每个位置均匀 yaw_count 个朝向，做无 prior 兜底搜索
+    double fallback_position_radius_m = 3.5;
+    int fallback_yaw_count = 8;
 
     std::size_t max_candidate_count = 1;
     double rank_weight_inlier = 0.5;
@@ -150,9 +155,7 @@ auto run_local(
 /**
  * @brief WIDE 重定位：对外部传入的 seed 列表逐个跑 TwoStageGicp，按 ranking 选最优
  *
- * seed 来源由 caller 决定：
- *   - SC 主路径：MapDescriptorDB::query 的 top-K 候选转为 world_to_base seed
- *   - SC 不可用：build_wide_fallback_seeds(prior, config)
+ * seed 来源由 caller 决定（SC 主路径 or fallback 路径）。
  */
 auto run_wide(
     const InitialRegistrationConfig& initial_config,
@@ -163,16 +166,5 @@ auto run_wide(
     const RegistrationPrior& prior,
     const std::vector<Eigen::Isometry3f>& seeds_world_to_base,
     RegistrationResult& result) -> bool;
-
-/**
- * @brief 构造 wide fallback seed 集（5 位置 × 8 yaw = 40 seed），围绕 prior.world_to_base
- *
- * - 位置偏移：(0,0), (±offset, 0), (0, ±offset)
- * - yaw 偏移（叠加 prior.yaw）：0, ±45°, ±90°, ±135°, 180°
- * 仅在 SC 不可用时使用。
- */
-auto build_wide_fallback_seeds(
-    const RegistrationPrior& prior, const WideRegistrationConfig& wide_config)
-    -> std::vector<Eigen::Isometry3f>;
 
 } // namespace rmcs::location::tools

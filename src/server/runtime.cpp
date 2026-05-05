@@ -40,6 +40,119 @@
 
 namespace rmcs::location {
 
+namespace {
+
+auto pose_is_finite(const geometry_msgs::msg::Pose& pose) -> bool {
+    return std::isfinite(pose.position.x) && std::isfinite(pose.position.y)
+        && std::isfinite(pose.position.z) && std::isfinite(pose.orientation.x)
+        && std::isfinite(pose.orientation.y) && std::isfinite(pose.orientation.z)
+        && std::isfinite(pose.orientation.w);
+}
+
+/// 把 SC 描述子返回的 (world_position, yaw_deg) 候选转为 world_to_base seed。
+///
+/// yaw 推导：
+///   - 库描述子在 world 系朝向构造（grid 中心仅 XY 平移，不旋转）
+///   - query 描述子在 odom 系朝向构造（translate_to_robot_frame 仅 XY 平移，不旋转）
+///   - 因此 SC 列位移找到的 yaw（match.yaw_deg）= world_to_odom 的 yaw（α）
+///   - 真实 world_to_base.yaw = α + odom_to_base.yaw（β），β 来自 LIO
+///   - seed.translation 是 grid 中心的 world 坐标，照填即可
+auto sc_match_to_seed(const ScanContextMatch& match, const Eigen::Isometry3f& odom_to_base)
+    -> Eigen::Isometry3f {
+    const auto sc_yaw_radian = static_cast<float>(match.yaw_deg * std::numbers::pi / 180.0);
+    const auto base_yaw_radian = static_cast<float>(std::atan2(
+        static_cast<double>(odom_to_base.rotation()(1, 0)),
+        static_cast<double>(odom_to_base.rotation()(0, 0))));
+    const auto seed_yaw_radian = sc_yaw_radian + base_yaw_radian;
+
+    auto seed = Eigen::Isometry3f::Identity();
+    seed.translation() = match.world_position;
+    seed.linear() =
+        Eigen::AngleAxisf{seed_yaw_radian, Eigen::Vector3f::UnitZ()}.toRotationMatrix();
+    return seed;
+}
+
+/// 把 odom 系点云平移到机器人当前位置（仅平移，不做旋转），用于构造 SC 描述子
+auto translate_to_robot_frame(
+    const std::shared_ptr<PointCloud>& query_odom_cloud, const Eigen::Isometry3f& odom_to_base)
+    -> std::shared_ptr<PointCloud> {
+    auto robot_centered = std::make_shared<PointCloud>();
+    robot_centered->reserve(query_odom_cloud->size());
+    const auto offset = odom_to_base.translation();
+    for (const auto& point : query_odom_cloud->points) {
+        Point shifted{};
+        shifted.x = point.x - offset.x();
+        shifted.y = point.y - offset.y();
+        shifted.z = point.z;
+        robot_centered->push_back(shifted);
+    }
+    robot_centered->width = static_cast<std::uint32_t>(robot_centered->size());
+    robot_centered->height = 1;
+    robot_centered->is_dense = query_odom_cloud->is_dense;
+    return robot_centered;
+}
+
+/// fallback 路径的种子布局：以 center 为中心的 5 个位置（中心 + 4 个方向）× yaw_count 个均匀 yaw。
+/// SC 库不可用或返回空时使用，不做位置 prior 假设。半径与 yaw 数由 YAML 配。
+auto build_wide_fallback_seeds(
+    const Eigen::Vector3f& center, double position_radius_m, int yaw_count)
+    -> std::vector<Eigen::Isometry3f> {
+    const auto radius = static_cast<float>(position_radius_m);
+    const auto yaws = std::max(1, yaw_count);
+
+    const auto positions = std::array<Eigen::Vector3f, 5>{
+        center,
+        center + Eigen::Vector3f{radius, 0.0F, 0.0F},
+        center + Eigen::Vector3f{-radius, 0.0F, 0.0F},
+        center + Eigen::Vector3f{0.0F, radius, 0.0F},
+        center + Eigen::Vector3f{0.0F, -radius, 0.0F},
+    };
+
+    auto seeds = std::vector<Eigen::Isometry3f>{};
+    seeds.reserve(positions.size() * static_cast<std::size_t>(yaws));
+    for (const auto& position : positions) {
+        for (int i = 0; i < yaws; ++i) {
+            const auto yaw_radian = static_cast<float>(
+                static_cast<double>(i) * 2.0 * std::numbers::pi / static_cast<double>(yaws));
+            auto seed = Eigen::Isometry3f::Identity();
+            seed.translation() = position;
+            seed.linear() =
+                Eigen::AngleAxisf{yaw_radian, Eigen::Vector3f::UnitZ()}.toRotationMatrix();
+            seeds.push_back(seed);
+        }
+    }
+    return seeds;
+}
+
+/// 拼接 "<mode> registration rejected: tag1,tag2,..." —— INITIAL/LOCAL/WIDE 共用
+auto build_validation_failure_message(
+    std::string_view mode, const ValidationResult& validation, bool include_inlier) -> std::string {
+    const auto add = [](std::string& msg, bool failed, std::string_view tag, bool& first) {
+        if (!failed) return;
+        msg += first ? ": " : ",";
+        msg += tag;
+        first = false;
+    };
+    auto msg = std::string{mode} + " registration rejected";
+    auto first = true;
+    add(msg, !validation.within_bounds, "out_of_bounds", first);
+    add(msg, !validation.score_ok, "score", first);
+    if (include_inlier)
+        add(msg, !validation.inlier_ok, "inlier", first);
+    add(msg, !validation.distance_ok, "distance", first);
+    add(msg, !validation.yaw_ok, "yaw", first);
+    return msg;
+}
+
+auto extract_yaw_deg(const Eigen::Isometry3f& pose) -> double {
+    return std::atan2(
+               static_cast<double>(pose.rotation()(1, 0)),
+               static_cast<double>(pose.rotation()(0, 0)))
+        * 180.0 / std::numbers::pi;
+}
+
+} // namespace
+
 struct RelocalizationServer::Impl {
     //在 handle_relocalize 中标记 busy，析构时自动清除。确保同一时刻只有一条重定位请求在处理。
     struct BusyGuard {
@@ -121,17 +234,10 @@ struct RelocalizationServer::Impl {
         initial.header.frame_id = world_frame_;
         initial.child_frame_id = odom_frame_;
         initial.transform.rotation.w = 1.0;
-        initial.transform.rotation.x = 0.0;
-        initial.transform.rotation.y = 0.0;
-        initial.transform.rotation.z = 0.0;
-        initial.transform.translation.x = 0.0;
-        initial.transform.translation.y = 0.0;
-        initial.transform.translation.z = 0.0;
 
         auto lock = std::scoped_lock{state_mutex_};
         current_world_to_odom_ = initial;
     }
-
 
     //加载 PCD 地图文件并构建 KD 树；若提供 descriptor_path 则尝试加载 SC 描述子库
     void load_map() {
@@ -150,7 +256,6 @@ struct RelocalizationServer::Impl {
         }
 
         map_kdtree_.setInputCloud(map_cloud_);
-        map_kdtree_ready_ = true;
         map_available_ = true;
 
         RCLCPP_INFO(
@@ -160,11 +265,7 @@ struct RelocalizationServer::Impl {
         load_scan_context_db();
     }
 
-    /**
-     * @brief 加载 SC 描述子库（.sc_desc）。失败则关闭 SC，wide 走 fallback。
-     *
-     * Phase 4：仅 bootstrap，wide handler 还不调用 db。Phase 5 接入。
-     */
+    /// 加载 SC 描述子库（.sc_desc）。失败则关闭 SC，wide 走 fallback。
     void load_scan_context_db() {
         scan_context_available_ = false;
         if (descriptor_path_.empty()) {
@@ -275,6 +376,19 @@ struct RelocalizationServer::Impl {
             .error_message = "",
             .ok = true,
         };
+    }
+
+    /// 把 query 点云搬到机器人本体系 → 构 SC 描述子 → 在描述子库做 top-K 旋转不变匹配。
+    /// SC 不可用 / 描述子库返回空时返回空 vector。local 与 wide 共用。
+    auto query_sc_matches(
+        const std::shared_ptr<PointCloud>& query_odom_cloud,
+        const Eigen::Isometry3f& odom_to_base, std::size_t top_k) const
+        -> std::vector<ScanContextMatch> {
+        if (!scan_context_available_)
+            return {};
+        const auto query_local = translate_to_robot_frame(query_odom_cloud, odom_to_base);
+        const auto query_descriptor = tools::build_descriptor(*query_local, scan_context_config_);
+        return map_descriptor_db_.query(query_descriptor, top_k);
     }
 
     //更新 world->odom 变换
@@ -393,25 +507,88 @@ struct RelocalizationServer::Impl {
         response.message = "ok";
     }
 
-    /// 构造 LOCAL/WIDE 共用 prior（去 sigma 后只剩 has_prior + world_to_base + odom_to_base）
-    static auto make_prior(
-        const rmcs_msgs::srv::Relocalize::Request& request,
-        const Eigen::Isometry3f& odom_to_base_before) -> RegistrationPrior {
-        auto prior = RegistrationPrior{};
-        prior.has_prior = true;
-        prior.world_to_base = tools::pose_to_isometry(request.initial_guess_world_base);
-        prior.odom_to_base = odom_to_base_before;
-        return prior;
+    /// 一次 local seed 尝试的结果：accepted=填响应并 return；rejected=记 message 进 continue；abort=致命错（lookup tf 失败）。
+    enum class LocalSeedOutcome { Accepted, Rejected, Abort };
+
+    /// 跑一个 SC seed 的完整 GICP + validator 流程。accepted 时填好 response 并 publish。
+    /// rejected 时 last_msg 写入失败原因（GICP 不收敛 / validator 拒收）。
+    /// abort 表示 lookup_odom_to_base 后失败，调用方应直接结束。
+    auto try_local_seed(
+        std::size_t seed_index, const ScanContextMatch& match,
+        const std::shared_ptr<PointCloud>& query_cloud,
+        const Eigen::Isometry3f& odom_to_base_before,
+        const Eigen::Isometry3f& user_world_to_base,
+        rmcs_msgs::srv::Relocalize::Response& response, std::string& last_msg)
+        -> LocalSeedOutcome {
+        const auto sc_seed = sc_match_to_seed(match, odom_to_base_before);
+        RCLCPP_INFO(
+            node_.get_logger(), "local: try seed[%zu] sc_score=%.4f pos=(%.2f,%.2f) yaw=%.1fdeg",
+            seed_index, match.sc_score, sc_seed.translation().x(), sc_seed.translation().y(),
+            match.yaw_deg);
+
+        auto seed_prior = RegistrationPrior{
+            .has_prior = true, .world_to_base = sc_seed, .odom_to_base = odom_to_base_before};
+
+        auto registration_result = RegistrationResult{};
+        if (!tools::run_local(
+                initial_registration_config_, local_registration_config_, query_cloud, map_cloud_,
+                map_kdtree_, seed_prior, registration_result)) {
+            last_msg = "local seed[" + std::to_string(seed_index) + "] GICP not converged";
+            return LocalSeedOutcome::Rejected;
+        }
+
+        auto odom_to_base_after = Eigen::Isometry3f::Identity();
+        if (!lookup_odom_to_base(odom_to_base_after)) {
+            response.message = "failed to query odom->base after registration";
+            return LocalSeedOutcome::Abort;
+        }
+
+        const auto world_to_base_estimated =
+            registration_result.world_to_odom * odom_to_base_after;
+
+        // validator 用 user prior 作参考（拦跨半场错配）
+        const auto validator_prior = RegistrationPrior{
+            .has_prior = true,
+            .world_to_base = user_world_to_base,
+            .odom_to_base = odom_to_base_before};
+
+        const auto validation = validator_->evaluate_local(
+            validator_prior, world_to_base_estimated, registration_result.score,
+            registration_result.inlier_ratio);
+
+        if (!validation.accepted) {
+            last_msg = build_validation_failure_message(
+                "local seed[" + std::to_string(seed_index) + "]", validation, true);
+            return LocalSeedOutcome::Rejected;
+        }
+
+        response.estimated_world_base = tools::isometry_to_pose(world_to_base_estimated);
+        response.world_to_odom = tools::isometry_to_transform(registration_result.world_to_odom);
+        response.fitness_score = static_cast<float>(registration_result.score);
+        response.within_field_bounds = validation.within_bounds;
+        response.confidence = validation.confidence;
+        update_and_publish_world_to_odom(registration_result.world_to_odom);
+        response.success = true;
+        response.message = "ok (seed " + std::to_string(seed_index) + ")";
+        return LocalSeedOutcome::Accepted;
     }
 
     /**
-     * @brief MODE_LOCAL：单 seed 围绕 prior 配准，依赖 prior 准确。热路径。
+     * @brief MODE_LOCAL：SC top-K 选种子 + 早停。prior 仅作 validator 安全网（拦镜像错配）。
+     *
+     * - seed_prior.world_to_base 来自 SC 候选（不依赖 prior 准）
+     * - validator_prior.world_to_base 来自 request.initial_guess_world_base（拦跨半场错配）
+     * - 早停：seed[0] 通过 validator 立即返回，seed[1] 仅当 seed[0] 失败时才跑
      */
     void handle_local_relocalize(
         const rmcs_msgs::srv::Relocalize::Request& request,
         rmcs_msgs::srv::Relocalize::Response& response) {
         if (!map_available_) {
             response.message = "map unavailable";
+            return;
+        }
+        if (!scan_context_available_) {
+            response.message = "SC unavailable";
             return;
         }
 
@@ -430,70 +607,221 @@ struct RelocalizationServer::Impl {
             return;
         }
 
-        const auto prior = make_prior(request, odom_to_base_before);
-        auto registration_result = RegistrationResult{};
-        if (!tools::run_local(
-                initial_registration_config_, local_registration_config_, query_result.cloud,
-                map_cloud_, map_kdtree_, prior, registration_result)) {
-            response.message = "local registration failed";
+        const auto matches = query_sc_matches(
+            query_result.cloud, odom_to_base_before, local_registration_config_.sc_top_k);
+        if (matches.empty()) {
+            response.message = "SC no match";
             return;
         }
 
+        const auto user_world_to_base =
+            tools::pose_to_isometry(request.initial_guess_world_base);
+        auto last_msg = std::string{"local: all SC seeds failed"};
+
+        for (std::size_t i = 0; i < matches.size(); ++i) {
+            switch (try_local_seed(
+                i, matches[i], query_result.cloud, odom_to_base_before, user_world_to_base,
+                response, last_msg)) {
+            case LocalSeedOutcome::Accepted: return;
+            case LocalSeedOutcome::Abort:    return;
+            case LocalSeedOutcome::Rejected: continue;
+            }
+        }
+
+        response.message = std::move(last_msg);
+    }
+
+    enum class WidePath { ScanContext, Fallback };
+
+    /// 把一次 wide 请求中跨 SC / fallback 两条路径需要传递的不变量打包，避免方法签名失控。
+    struct WideRequestCtx {
+        rmcs_msgs::srv::Relocalize::Response& response;
+        std::shared_ptr<PointCloud> query_cloud;
+        RegistrationPrior registration_prior;
+        RegistrationPrior validator_prior;
+        WideRegistrationConfig sc_config;
+        WideRegistrationConfig fallback_config;
+    };
+
+    /// SC 路径专用 wide config：种子带准 yaw，关掉 yaw sweep 让 GICP 直接收敛
+    auto make_sc_wide_config() const -> WideRegistrationConfig {
+        auto config = wide_registration_config_;
+        config.yaw_window_deg = 6.0;
+        config.coarse_yaw_step_deg = 6.0;
+        return config;
+    }
+
+    /// fallback 路径专用 wide config：YAML 接管除全向 yaw 扫和 coarse score 安全下限外的所有参数
+    auto make_fallback_wide_config() const -> WideRegistrationConfig {
+        auto config = wide_registration_config_;
+        config.yaw_window_deg = 180.0;
+        config.coarse_score_threshold = std::max(config.coarse_score_threshold, 0.15);
+        return config;
+    }
+
+    /// 完成一次 wide attempt：算 estimated → validator → 装填 response。
+    /// 验收通过返回 true（同时 publish world_to_odom 和置 response.success）。
+    auto finalize_wide_attempt(
+        WideRequestCtx& ctx, const RegistrationResult& attempt, WidePath path) -> bool {
         auto odom_to_base_after = Eigen::Isometry3f::Identity();
         if (!lookup_odom_to_base(odom_to_base_after)) {
-            response.message = "failed to query odom->base after registration";
-            return;
+            ctx.response.message = "failed to query odom->base after registration";
+            return false;
         }
 
-        const auto world_to_base_estimated = registration_result.world_to_odom * odom_to_base_after;
-        const auto validation = validator_->evaluate_local(
-            prior, world_to_base_estimated, registration_result.score,
-            registration_result.inlier_ratio);
+        const auto world_to_base_estimated = attempt.world_to_odom * odom_to_base_after;
+        const auto validation = validator_->evaluate_wide(
+            ctx.validator_prior, world_to_base_estimated, attempt.score, attempt.inlier_ratio);
 
-        response.estimated_world_base = tools::isometry_to_pose(world_to_base_estimated);
-        response.world_to_odom = tools::isometry_to_transform(registration_result.world_to_odom);
-        response.fitness_score = static_cast<float>(registration_result.score);
-        response.within_field_bounds = validation.within_bounds;
-        response.confidence = validation.confidence;
+        ctx.response.estimated_world_base = tools::isometry_to_pose(world_to_base_estimated);
+        ctx.response.world_to_odom = tools::isometry_to_transform(attempt.world_to_odom);
+        ctx.response.fitness_score = static_cast<float>(attempt.score);
+        ctx.response.within_field_bounds = validation.within_bounds;
+        ctx.response.confidence = validation.confidence;
 
         if (!validation.accepted) {
-            response.message = build_validation_failure_message("local", validation, true);
-            return;
+            ctx.response.message = build_validation_failure_message("wide", validation, true);
+            if (path == WidePath::ScanContext) {
+                RCLCPP_WARN(
+                    node_.get_logger(),
+                    "wide: SC rejected estimated=(%.2f,%.2f,%.1fdeg) score=%.4f inlier=%.3f | %s",
+                    world_to_base_estimated.translation().x(),
+                    world_to_base_estimated.translation().y(),
+                    extract_yaw_deg(world_to_base_estimated), attempt.score, attempt.inlier_ratio,
+                    ctx.response.message.c_str());
+            }
+            return false;
         }
 
-        update_and_publish_world_to_odom(registration_result.world_to_odom);
-        response.success = true;
-        response.message = "ok";
+        log_wide_accepted(ctx, path, world_to_base_estimated, attempt);
+        update_and_publish_world_to_odom(attempt.world_to_odom);
+        ctx.response.success = true;
+        ctx.response.message = "ok";
+        return true;
     }
 
-    /// 把 SC 描述子返回的 (world_position, yaw_deg) 候选转为 world_to_base seed
-    static auto sc_match_to_seed(const ScanContextMatch& match) -> Eigen::Isometry3f {
-        const auto yaw_radian = static_cast<float>(match.yaw_deg * std::numbers::pi / 180.0);
-        auto seed = Eigen::Isometry3f::Identity();
-        seed.translation() = match.world_position;
-        seed.linear() =
-            Eigen::AngleAxisf{ yaw_radian, Eigen::Vector3f::UnitZ() }.toRotationMatrix();
-        return seed;
-    }
-
-    /// 把 odom 系点云平移到 robot-centered（odom_to_base 的位置变成原点），用于构造 SC 描述子
-    static auto translate_to_robot_frame(
-        const std::shared_ptr<PointCloud>& query_odom_cloud,
-        const Eigen::Isometry3f& odom_to_base) -> std::shared_ptr<PointCloud> {
-        auto robot_centered = std::make_shared<PointCloud>();
-        robot_centered->reserve(query_odom_cloud->size());
-        const auto offset = odom_to_base.translation();
-        for (const auto& point : query_odom_cloud->points) {
-            Point shifted{};
-            shifted.x = point.x - offset.x();
-            shifted.y = point.y - offset.y();
-            shifted.z = point.z;
-            robot_centered->push_back(shifted);
+    /// 跑一组 seeds 走 wide pipeline：seeds 空 / GICP 全失败 → 写诊断 message 返回 false。
+    auto try_wide_path(
+        WideRequestCtx& ctx, WidePath path, std::vector<Eigen::Isometry3f> seeds) -> bool {
+        if (seeds.empty()) {
+            ctx.response.message =
+                (path == WidePath::ScanContext) ? "wide SC seed empty" : "wide fallback seed empty";
+            return false;
         }
-        robot_centered->width = static_cast<std::uint32_t>(robot_centered->size());
-        robot_centered->height = 1;
-        robot_centered->is_dense = query_odom_cloud->is_dense;
-        return robot_centered;
+
+        auto registration_result = RegistrationResult{};
+        const auto& attempt_config =
+            (path == WidePath::Fallback) ? ctx.fallback_config : ctx.sc_config;
+        if (!tools::run_wide(
+                initial_registration_config_, attempt_config, ctx.query_cloud, map_cloud_,
+                map_kdtree_, ctx.registration_prior, seeds, registration_result)) {
+            ctx.response.message = (path == WidePath::ScanContext)
+                ? "wide registration failed (path=scan_context)"
+                : "wide registration failed (path=fallback)";
+            return false;
+        }
+        return finalize_wide_attempt(ctx, registration_result, path);
+    }
+
+    /// 接受时的详细日志：分 has_prior / no_prior 两条格式
+    void log_wide_accepted(
+        const WideRequestCtx& ctx, WidePath path,
+        const Eigen::Isometry3f& world_to_base_estimated,
+        const RegistrationResult& attempt) const {
+        const auto path_label = (path == WidePath::ScanContext) ? "scan_context" : "fallback";
+        const auto estimated_yaw_deg = extract_yaw_deg(world_to_base_estimated);
+
+        if (ctx.validator_prior.has_prior) {
+            const auto prior_yaw_deg = extract_yaw_deg(ctx.validator_prior.world_to_base);
+            const auto distance_error_m =
+                (world_to_base_estimated.translation()
+                 - ctx.validator_prior.world_to_base.translation())
+                    .norm();
+            const auto yaw_error_deg =
+                std::abs(std::atan2(
+                    std::sin((estimated_yaw_deg - prior_yaw_deg) * std::numbers::pi / 180.0),
+                    std::cos((estimated_yaw_deg - prior_yaw_deg) * std::numbers::pi / 180.0)))
+                * 180.0 / std::numbers::pi;
+            RCLCPP_INFO(
+                node_.get_logger(),
+                "wide: accepted path=%s estimated=(%.2f,%.2f,%.1fdeg) prior=(%.2f,%.2f,%.1fdeg) "
+                "score=%.4f inlier=%.3f dist=%.3fm yaw_err=%.1fdeg",
+                path_label, world_to_base_estimated.translation().x(),
+                world_to_base_estimated.translation().y(), estimated_yaw_deg,
+                ctx.validator_prior.world_to_base.translation().x(),
+                ctx.validator_prior.world_to_base.translation().y(), prior_yaw_deg,
+                attempt.score, attempt.inlier_ratio, distance_error_m, yaw_error_deg);
+        } else {
+            RCLCPP_INFO(
+                node_.get_logger(),
+                "wide: accepted path=%s estimated=(%.2f,%.2f,%.1fdeg) score=%.4f inlier=%.3f",
+                path_label, world_to_base_estimated.translation().x(),
+                world_to_base_estimated.translation().y(), estimated_yaw_deg, attempt.score,
+                attempt.inlier_ratio);
+        }
+    }
+
+    /// SC 主路径：返回 (尝试过, 成功)。失败时 ctx.response.message 已写好。
+    auto try_wide_sc_path(WideRequestCtx& ctx, const Eigen::Isometry3f& odom_to_base_before)
+        -> std::pair<bool, bool> {
+        if (!scan_context_available_)
+            return {false, false};
+
+        const auto matches = query_sc_matches(
+            ctx.query_cloud, odom_to_base_before, wide_registration_config_.sc_top_k);
+        if (matches.empty()) {
+            RCLCPP_WARN(node_.get_logger(), "wide: SC query empty, falling back to multi-seed");
+            return {false, false};
+        }
+
+        auto seeds = std::vector<Eigen::Isometry3f>{};
+        seeds.reserve(matches.size());
+        for (const auto& match : matches)
+            seeds.push_back(sc_match_to_seed(match, odom_to_base_before));
+
+        RCLCPP_INFO(
+            node_.get_logger(), "wide: SC returned %zu candidates (top sc_score=%.4f)",
+            matches.size(), matches.front().sc_score);
+        RCLCPP_INFO(
+            node_.get_logger(),
+            "wide: SC cfg yaw=±%.1fdeg coarse/refine_step=%.1f/%.1fdeg "
+            "score_th=%.3f cand=%zu submap=%.1fm iter=%d/%d/%d max_corr=%.1fm",
+            ctx.sc_config.yaw_window_deg, ctx.sc_config.coarse_yaw_step_deg,
+            ctx.sc_config.refine_yaw_step_deg, ctx.sc_config.coarse_score_threshold,
+            ctx.sc_config.max_candidate_count, ctx.sc_config.submap_radius_m,
+            ctx.sc_config.coarse_iterations, ctx.sc_config.refine_iterations,
+            ctx.sc_config.precise_iterations, ctx.sc_config.max_correspondence_distance_m);
+        for (std::size_t i = 0; i < matches.size(); ++i) {
+            const auto& match = matches[i];
+            RCLCPP_INFO(
+                node_.get_logger(), "wide: SC[%zu] pos=(%.2f,%.2f) yaw=%.1fdeg score=%.4f", i,
+                match.world_position.x(), match.world_position.y(), match.yaw_deg, match.sc_score);
+        }
+
+        if (try_wide_path(ctx, WidePath::ScanContext, std::move(seeds)))
+            return {true, true};
+        RCLCPP_WARN(node_.get_logger(), "wide: SC failed, falling back");
+        return {true, false};
+    }
+
+    void log_wide_fallback_setup(
+        const WideRequestCtx& ctx, const Eigen::Vector3f& center, std::size_t seed_count) const {
+        RCLCPP_INFO(
+            node_.get_logger(),
+            "wide: fallback seeds=%zu around center=(%.2f,%.2f) "
+            "(submap_radius=%.1fm yaw_window=±%.1fdeg coarse_step=%.1fdeg "
+            "iter=%d/%d/%d max_corr=%.1fm score_th=%.3f)",
+            seed_count, center.x(), center.y(), ctx.fallback_config.submap_radius_m,
+            ctx.fallback_config.yaw_window_deg, ctx.fallback_config.coarse_yaw_step_deg,
+            ctx.fallback_config.coarse_iterations, ctx.fallback_config.refine_iterations,
+            ctx.fallback_config.precise_iterations, ctx.fallback_config.max_correspondence_distance_m,
+            ctx.fallback_config.coarse_score_threshold);
+        RCLCPP_INFO(
+            node_.get_logger(),
+            "wide: prior gates distance<=%.2fm yaw<=%.1fdeg score<=%.3f inlier>=%.3f",
+            wide_validation_config_.max_distance_from_prior_m,
+            wide_validation_config_.max_yaw_from_prior_deg, wide_validation_config_.score_threshold,
+            wide_validation_config_.min_inlier_ratio);
     }
 
     /**
@@ -522,73 +850,50 @@ struct RelocalizationServer::Impl {
             return;
         }
 
-        const auto prior = make_prior(request, odom_to_base_before);
+        auto registration_prior = RegistrationPrior{};
+        registration_prior.has_prior = false;
+        registration_prior.odom_to_base = odom_to_base_before;
 
-        // 准备 seed 列表：SC 主路径优先，不可用降级 fallback
-        auto seeds = std::vector<Eigen::Isometry3f>{};
-        const auto* path_label = "fallback";
-        if (scan_context_available_) {
-            const auto query_local =
-                translate_to_robot_frame(query_result.cloud, odom_to_base_before);
-            const auto query_descriptor =
-                tools::build_descriptor(*query_local, scan_context_config_);
-            const auto matches = map_descriptor_db_.query(
-                query_descriptor, wide_registration_config_.sc_top_k);
-            if (!matches.empty()) {
-                seeds.reserve(matches.size());
-                for (const auto& match : matches)
-                    seeds.push_back(sc_match_to_seed(match));
-                path_label = "scan_context";
-                RCLCPP_INFO(
-                    node_.get_logger(),
-                    "wide: SC returned %zu candidates (top sc_score=%.4f)", matches.size(),
-                    matches.front().sc_score);
-            } else {
-                RCLCPP_WARN(
-                    node_.get_logger(), "wide: SC query empty, falling back to multi-seed");
-            }
-        }
-        if (seeds.empty()) {
-            seeds = tools::build_wide_fallback_seeds(prior, wide_registration_config_);
-            RCLCPP_INFO(
-                node_.get_logger(), "wide: using %zu fallback seeds (path=%s)", seeds.size(),
-                path_label);
+        auto validator_prior = RegistrationPrior{};
+        validator_prior.has_prior = false;
+        validator_prior.odom_to_base = odom_to_base_before;
+        if (pose_is_finite(request.initial_guess_world_base)) {
+            validator_prior.has_prior = true;
+            validator_prior.world_to_base = tools::pose_to_isometry(request.initial_guess_world_base);
+        } else {
+            RCLCPP_WARN(
+                node_.get_logger(),
+                "wide: request initial_guess_world_base has NaN/Inf, disable prior-based validation");
         }
 
-        auto registration_result = RegistrationResult{};
-        if (!tools::run_wide(
-                initial_registration_config_, wide_registration_config_, query_result.cloud,
-                map_cloud_, map_kdtree_, prior, seeds, registration_result)) {
-            response.message =
-                std::string{"wide registration failed (path="} + path_label + ")";
+        auto ctx = WideRequestCtx{
+            .response = response,
+            .query_cloud = query_result.cloud,
+            .registration_prior = registration_prior,
+            .validator_prior = validator_prior,
+            .sc_config = make_sc_wide_config(),
+            .fallback_config = make_fallback_wide_config(),
+        };
+
+        // SC 主路径：成功直接返回；尝试过但失败则记下，最终 message 加前缀
+        const auto [sc_attempted, sc_succeeded] = try_wide_sc_path(ctx, odom_to_base_before);
+        if (sc_succeeded)
             return;
-        }
 
-        auto odom_to_base_after = Eigen::Isometry3f::Identity();
-        if (!lookup_odom_to_base(odom_to_base_after)) {
-            response.message = "failed to query odom->base after registration";
+        // fallback 多 seed
+        const auto fallback_center = validator_prior.has_prior
+            ? Eigen::Vector3f{validator_prior.world_to_base.translation()}
+            : Eigen::Vector3f::Zero();
+        auto fallback_seeds = build_wide_fallback_seeds(
+            fallback_center, wide_registration_config_.fallback_position_radius_m,
+            wide_registration_config_.fallback_yaw_count);
+        log_wide_fallback_setup(ctx, fallback_center, fallback_seeds.size());
+
+        if (try_wide_path(ctx, WidePath::Fallback, std::move(fallback_seeds)))
             return;
-        }
 
-        const auto world_to_base_estimated = registration_result.world_to_odom * odom_to_base_after;
-        const auto validation = validator_->evaluate_wide(
-            prior, world_to_base_estimated, registration_result.score,
-            registration_result.inlier_ratio);
-
-        response.estimated_world_base = tools::isometry_to_pose(world_to_base_estimated);
-        response.world_to_odom = tools::isometry_to_transform(registration_result.world_to_odom);
-        response.fitness_score = static_cast<float>(registration_result.score);
-        response.within_field_bounds = validation.within_bounds;
-        response.confidence = validation.confidence;
-
-        if (!validation.accepted) {
-            response.message = build_validation_failure_message("wide", validation, true);
-            return;
-        }
-
-        update_and_publish_world_to_odom(registration_result.world_to_odom);
-        response.success = true;
-        response.message = "ok";
+        if (sc_attempted && response.message.rfind("wide registration failed", 0) != 0)
+            response.message = std::string{"wide failed after fallback: "} + response.message;
     }
 
     void handle_relocalize(
@@ -630,27 +935,6 @@ struct RelocalizationServer::Impl {
         default: response->message = "unsupported relocalization mode"; break;
         }
         log_if_failed(mode_label, *request, *response);
-    }
-
-    /// 拼接 "<mode> registration rejected: tag1,tag2,..." —— INITIAL/LOCAL/WIDE 共用
-    static auto build_validation_failure_message(
-        std::string_view mode, const ValidationResult& validation, bool include_inlier)
-        -> std::string {
-        const auto add = [&](std::string& msg, bool failed, std::string_view tag, bool& first) {
-            if (!failed) return;
-            msg += first ? ": " : ",";
-            msg += tag;
-            first = false;
-        };
-        auto msg = std::string{mode} + " registration rejected";
-        auto first = true;
-        add(msg, !validation.within_bounds, "out_of_bounds", first);
-        add(msg, !validation.score_ok, "score", first);
-        if (include_inlier)
-            add(msg, !validation.inlier_ok, "inlier", first);
-        add(msg, !validation.distance_ok, "distance", first);
-        add(msg, !validation.yaw_ok, "yaw", first);
-        return msg;
     }
 
     /// 失败时打一行带上下文的 warn（mode + msg + prior 位置），由 dispatcher 在 handler 返回后调用
@@ -700,7 +984,6 @@ struct RelocalizationServer::Impl {
     bool map_available_ = false;
     std::shared_ptr<PointCloud> map_cloud_;
     pcl::KdTreeFLANN<Point> map_kdtree_;
-    bool map_kdtree_ready_ = false;
 
     std::unique_ptr<Collector> collector_;
     std::unique_ptr<Validator> validator_;

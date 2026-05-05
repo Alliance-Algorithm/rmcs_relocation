@@ -3,7 +3,7 @@ rmcs_relocation:
     map_path: "/workspaces/RMCS/rmcs_ws/src/rmcs-navigation-deps/rmcs-relocation/maps/1.pcd"
     # map_path: "/tmp/point-lio/1.pcd"
     # 全局 SC 描述子库路径
-    descriptor_path: ""              
+    descriptor_path: "/workspaces/RMCS/rmcs_ws/src/rmcs-navigation-deps/rmcs-relocation/maps/1.sc_desc"
     world_frame: "world"
     odom_frame: "odom"
     base_frame: "base_link"
@@ -58,43 +58,46 @@ rmcs_relocation:
           max_z: 2.0
 
 
-    # local.* — 局部纠正 (MODE_LOCAL=1)
+    # local.* — 局部纠正 (MODE_LOCAL=1)，SC top-K 选种子 + 早停
     local:
-        # [2-1] 点云采集
+        # [2-1] 点云采集（运动中减漂移：1.5m/s × 0.5s = 0.75m）
         pointcloud_topic: "/cloud_registered_undistort"
-        collect_duration_sec: 0.8
+        collect_duration_sec: 0.5
         min_accumulated_points: 1000
 
-        # [2-2] 配准质量
+        # [2-2] 配准质量（SC 给好 yaw 后无需深迭代）
         submap_radius_m: 5.0
-        coarse_iterations: 12
-        refine_iterations: 6
-        precise_iterations: 12
-        max_correspondence_distance_m: 4.0
-        coarse_score_threshold: 0.5    
+        coarse_iterations: 8
+        refine_iterations: 4
+        precise_iterations: 8
+        max_correspondence_distance_m: 3.0
+        coarse_score_threshold: 0.5
 
-        # [2-3] yaw 搜索窗口
-        yaw_window_deg: 30.0
-        coarse_yaw_step_deg: 15.0
-        refine_yaw_step_deg: 12.0
+        # [2-3] yaw 搜索窗口（= 360/num_sectors=6° 量化误差，3 候选 0/+6/-6）
+        yaw_window_deg: 6.0
+        coarse_yaw_step_deg: 6.0
+        refine_yaw_step_deg: 6.0
 
         # [2-4] map consistency filter（默认关）
         enable_map_consistency_filter: false
         map_consistency_distance_m: 0.8
         min_retained_fraction: 0.15
 
-        # [2-5] 验收阈值
-        score_threshold: 0.50
-        min_inlier_ratio: 0.10
-        max_distance_from_prior_m: 5.0
-        max_yaw_from_prior_deg: 60.0
+        # [2-5] SC 候选数（镜像对称兜底；早停，平时只跑 1 次）
+        sc_top_k: 2
+
+        # [2-6] 验收阈值（max_distance_from_prior_m 关键：拦跨半场。RMUC 镜像最近 ~7m）
+        score_threshold: 0.40
+        min_inlier_ratio: 0.08
+        max_distance_from_prior_m: 6.0
+        max_yaw_from_prior_deg: 90.0
         field_bounds:
-          min_x: -2.0
-          max_x: 7.0
-          min_y: -5.5
-          max_y: 5.5
-          min_z: -2.0
-          max_z: 2.0
+          min_x: -10.0
+          max_x: 10.0
+          min_y: -10.5
+          max_y: 10.5
+          min_z: -5.0
+          max_z: 5.0
 
 
     # wide.* — 全局兜底 (MODE_WIDE=2)
@@ -109,21 +112,23 @@ rmcs_relocation:
         coarse_iterations: 15
         refine_iterations: 10
         precise_iterations: 25
-        max_correspondence_distance_m: 4.0
-        coarse_score_threshold: 0.35
+        max_correspondence_distance_m: 6.0
+        coarse_score_threshold: 0.5
 
         # [3-3] yaw 搜索窗口
-        yaw_window_deg: 60.0
-        coarse_yaw_step_deg: 18.0
-        refine_yaw_step_deg: 12.0
+        yaw_window_deg: 180.0
+        coarse_yaw_step_deg: 15.0
+        refine_yaw_step_deg: 10.0
 
         # [3-4] SC 主路径：从描述子库取前 sc_top_k 个候选作为 seed
-        sc_top_k: 5
-        # SC 不可用时的 fallback 位置偏移半径（5 位置 × 8 yaw = 40 seed 笛卡尔积）
-        seed_offset_m: 1.5
+        sc_top_k: 1
         max_candidate_count: 1
         rank_weight_inlier: 0.5
         rank_weight_distance: 0.3
+
+        # [3-4b] fallback 路径（SC 不可用 / 无匹配时）：5 个位置 × yaw_count 个均匀朝向
+        fallback_position_radius_m: 3.5
+        fallback_yaw_count: 8
 
         # [3-5] map consistency filter（默认关）
         enable_map_consistency_filter: false
@@ -131,7 +136,7 @@ rmcs_relocation:
         min_retained_fraction: 0.15
 
         # [3-6] 验收阈值
-        score_threshold: 0.35
+        score_threshold: 0.6
         min_inlier_ratio: 0.08
         max_distance_from_prior_m: 12.0
         max_yaw_from_prior_deg: 120.0
