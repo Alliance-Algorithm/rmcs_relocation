@@ -91,8 +91,8 @@ MODE_LOCAL (server)
 
 ```cpp
 void handle_local_relocalize(
-    const rmcs_msgs::srv::Relocalize::Request& request,
-    rmcs_msgs::srv::Relocalize::Response& response) {
+    const rmcs_relocation::srv::Relocalize::Request& request,
+    rmcs_relocation::srv::Relocalize::Response& response) {
     if (!map_available_) { response.message = "map unavailable"; return; }
     if (!scan_context_available_) { response.message = "SC unavailable"; return; }
 

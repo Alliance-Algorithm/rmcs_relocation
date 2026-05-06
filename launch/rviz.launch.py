@@ -12,8 +12,8 @@ def generate_launch_description():
 
     declare_config = DeclareLaunchArgument(
         "config",
-        default_value=[FindPackageShare("rmcs-relocation"), "/config/location.yaml"],
-        description="Path to rmcs-relocation parameter file",
+        default_value=[FindPackageShare("rmcs_relocation"), "/config/location.yaml"],
+        description="Path to rmcs_relocation parameter file",
     )
 
     declare_use_rviz = DeclareLaunchArgument(
@@ -23,7 +23,7 @@ def generate_launch_description():
     )
 
     pcd_publisher = Node(
-        package="rmcs-relocation",
+        package="rmcs_relocation",
         executable="pcd_publisher.py",
         name="pcd_publisher",
         output="screen",
@@ -31,7 +31,7 @@ def generate_launch_description():
     )
 
     tf_to_pose = Node(
-        package="rmcs-relocation",
+        package="rmcs_relocation",
         executable="tf_to_pose.py",
         name="tf_to_pose",
         output="screen",
@@ -42,7 +42,7 @@ def generate_launch_description():
         package="rviz2",
         executable="rviz2",
         name="rviz2",
-        arguments=["-d", [FindPackageShare("rmcs-relocation"), "/config/rviz.rviz"]],
+        arguments=["-d", [FindPackageShare("rmcs_relocation"), "/config/rviz.rviz"]],
         condition=IfCondition(use_rviz),
     )
 

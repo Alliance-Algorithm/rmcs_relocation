@@ -10,13 +10,13 @@ def generate_launch_description():
 
     declare_config = DeclareLaunchArgument(
         "config",
-        default_value=[FindPackageShare("rmcs-relocation"), "/config/location.yaml"],
-        description="Path to rmcs-relocation parameter file",
+        default_value=[FindPackageShare("rmcs_relocation"), "/config/location.yaml"],
+        description="Path to rmcs_relocation parameter file",
     )
 
     location_server = Node(
-        package="rmcs-relocation",
-        executable="rmcs-relocation_server",
+        package="rmcs_relocation",
+        executable="rmcs_relocation_server",
         name="rmcs_relocation",
         output="screen",
         parameters=[config],

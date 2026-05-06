@@ -31,7 +31,7 @@
 #include <pcl/kdtree/kdtree_flann.h>
 #include <pcl/common/transforms.h>
 #include <rclcpp/qos.hpp>
-#include <rmcs_msgs/srv/relocalize.hpp>
+#include <rmcs_relocation/srv/relocalize.hpp>
 #include <tf2/exceptions.h>
 #include <tf2/time.h>
 #include <tf2_ros/buffer.h>
@@ -180,11 +180,11 @@ struct RelocalizationServer::Impl {
         service_group_ = node_.create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
         pointcloud_group_ = node_.create_callback_group(rclcpp::CallbackGroupType::Reentrant);
 
-        relocalize_service_ = node_.create_service<rmcs_msgs::srv::Relocalize>(
+        relocalize_service_ = node_.create_service<rmcs_relocation::srv::Relocalize>(
             service_name_,
             [this](
-                const std::shared_ptr<rmcs_msgs::srv::Relocalize::Request> request,
-                std::shared_ptr<rmcs_msgs::srv::Relocalize::Response> response) {
+                const std::shared_ptr<rmcs_relocation::srv::Relocalize::Request> request,
+                std::shared_ptr<rmcs_relocation::srv::Relocalize::Response> response) {
                 handle_relocalize(request, std::move(response));
             },
             rclcpp::ServicesQoS(), service_group_);
@@ -295,7 +295,7 @@ struct RelocalizationServer::Impl {
     }
 
     // 在开始处理重定位请求前，将响应对象重置为默认的失败状态
-    static void reset_response(rmcs_msgs::srv::Relocalize::Response& response) {
+    static void reset_response(rmcs_relocation::srv::Relocalize::Response& response) {
         response.success = false;
         response.message = "";
         response.fitness_score = std::numeric_limits<float>::infinity();
@@ -350,7 +350,7 @@ struct RelocalizationServer::Impl {
      * 对 topic 和 duration 应用默认值回退逻辑后，调用 Collector 采集 odom 点云并检查点数是否达标。
      */
     auto collect_and_validate_points(
-        const rmcs_msgs::srv::Relocalize::Request& request, const std::string& default_topic,
+        const rmcs_relocation::srv::Relocalize::Request& request, const std::string& default_topic,
         double default_duration_sec, int min_points) -> CollectResult {
         auto query_topic = request.pointcloud_topic;
         if (query_topic.empty())
@@ -412,8 +412,8 @@ struct RelocalizationServer::Impl {
      * 结果验收 → 更新 world->odom。
      */
     void handle_initial_relocalize(
-        const rmcs_msgs::srv::Relocalize::Request& request,
-        rmcs_msgs::srv::Relocalize::Response& response) {
+        const rmcs_relocation::srv::Relocalize::Request& request,
+        rmcs_relocation::srv::Relocalize::Response& response) {
         if (!map_available_) {
             response.message = "map unavailable";
             return;
@@ -518,7 +518,7 @@ struct RelocalizationServer::Impl {
         const std::shared_ptr<PointCloud>& query_cloud,
         const Eigen::Isometry3f& odom_to_base_before,
         const Eigen::Isometry3f& user_world_to_base,
-        rmcs_msgs::srv::Relocalize::Response& response, std::string& last_msg)
+        rmcs_relocation::srv::Relocalize::Response& response, std::string& last_msg)
         -> LocalSeedOutcome {
         const auto sc_seed = sc_match_to_seed(match, odom_to_base_before);
         RCLCPP_INFO(
@@ -581,8 +581,8 @@ struct RelocalizationServer::Impl {
      * - 早停：seed[0] 通过 validator 立即返回，seed[1] 仅当 seed[0] 失败时才跑
      */
     void handle_local_relocalize(
-        const rmcs_msgs::srv::Relocalize::Request& request,
-        rmcs_msgs::srv::Relocalize::Response& response) {
+        const rmcs_relocation::srv::Relocalize::Request& request,
+        rmcs_relocation::srv::Relocalize::Response& response) {
         if (!map_available_) {
             response.message = "map unavailable";
             return;
@@ -635,7 +635,7 @@ struct RelocalizationServer::Impl {
 
     /// 把一次 wide 请求中跨 SC / fallback 两条路径需要传递的不变量打包，避免方法签名失控。
     struct WideRequestCtx {
-        rmcs_msgs::srv::Relocalize::Response& response;
+        rmcs_relocation::srv::Relocalize::Response& response;
         std::shared_ptr<PointCloud> query_cloud;
         RegistrationPrior registration_prior;
         RegistrationPrior validator_prior;
@@ -828,8 +828,8 @@ struct RelocalizationServer::Impl {
      * @brief MODE_WIDE：全局兜底。SC 描述子库可用时走 SC top-K 主路径；不可用时走 fallback 多 seed
      */
     void handle_wide_relocalize(
-        const rmcs_msgs::srv::Relocalize::Request& request,
-        rmcs_msgs::srv::Relocalize::Response& response) {
+        const rmcs_relocation::srv::Relocalize::Request& request,
+        rmcs_relocation::srv::Relocalize::Response& response) {
         if (!map_available_) {
             response.message = "map unavailable";
             return;
@@ -897,8 +897,8 @@ struct RelocalizationServer::Impl {
     }
 
     void handle_relocalize(
-        const std::shared_ptr<rmcs_msgs::srv::Relocalize::Request> request,
-        std::shared_ptr<rmcs_msgs::srv::Relocalize::Response> response) {
+        const std::shared_ptr<rmcs_relocation::srv::Relocalize::Request> request,
+        std::shared_ptr<rmcs_relocation::srv::Relocalize::Response> response) {
         if (!response)
             return;
 
@@ -920,15 +920,15 @@ struct RelocalizationServer::Impl {
 
         std::string_view mode_label = "unknown";
         switch (request->mode) {
-        case rmcs_msgs::srv::Relocalize::Request::MODE_INITIAL:
+        case rmcs_relocation::srv::Relocalize::Request::MODE_INITIAL:
             mode_label = "initial";
             handle_initial_relocalize(*request, *response);
             break;
-        case rmcs_msgs::srv::Relocalize::Request::MODE_LOCAL:
+        case rmcs_relocation::srv::Relocalize::Request::MODE_LOCAL:
             mode_label = "local";
             handle_local_relocalize(*request, *response);
             break;
-        case rmcs_msgs::srv::Relocalize::Request::MODE_WIDE:
+        case rmcs_relocation::srv::Relocalize::Request::MODE_WIDE:
             mode_label = "wide";
             handle_wide_relocalize(*request, *response);
             break;
@@ -939,8 +939,8 @@ struct RelocalizationServer::Impl {
 
     /// 失败时打一行带上下文的 warn（mode + msg + prior 位置），由 dispatcher 在 handler 返回后调用
     void log_if_failed(
-        std::string_view mode, const rmcs_msgs::srv::Relocalize::Request& request,
-        const rmcs_msgs::srv::Relocalize::Response& response) const {
+        std::string_view mode, const rmcs_relocation::srv::Relocalize::Request& request,
+        const rmcs_relocation::srv::Relocalize::Response& response) const {
         if (!log_failure_details_ || response.success)
             return;
         const auto& p = request.initial_guess_world_base.position;
@@ -990,7 +990,7 @@ struct RelocalizationServer::Impl {
 
     rclcpp::CallbackGroup::SharedPtr service_group_;
     rclcpp::CallbackGroup::SharedPtr pointcloud_group_;
-    rclcpp::Service<rmcs_msgs::srv::Relocalize>::SharedPtr relocalize_service_;
+    rclcpp::Service<rmcs_relocation::srv::Relocalize>::SharedPtr relocalize_service_;
 
     std::shared_ptr<rclcpp::TimerBase> tf_publish_timer_;
 

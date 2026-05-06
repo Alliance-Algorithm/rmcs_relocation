@@ -9,8 +9,8 @@ set(RMCS_RELOCATION_TEST_INCLUDE_DIRS
 function(rmcs_relocation_configure_test target_name)
   target_include_directories(${target_name} PRIVATE ${RMCS_RELOCATION_TEST_INCLUDE_DIRS})
   target_compile_features(${target_name} PUBLIC cxx_std_23)
-  if(rmcs-relocation_compile_options)
-    target_compile_options(${target_name} PRIVATE ${rmcs-relocation_compile_options})
+  if(rmcs_relocation_compile_options)
+    target_compile_options(${target_name} PRIVATE ${rmcs_relocation_compile_options})
   endif()
 endfunction()
 
@@ -40,7 +40,7 @@ if(TARGET test_registration)
   rmcs_relocation_configure_test(test_registration)
   target_link_libraries(test_registration
     Eigen3::Eigen
-    rmcs-relocation_small_gicp
+    rmcs_relocation_small_gicp
     ${PCL_LIBRARIES}
   )
   ament_target_dependencies(test_registration

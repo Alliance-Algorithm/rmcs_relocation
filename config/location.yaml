@@ -1,9 +1,9 @@
 rmcs_relocation:
   ros__parameters:
-    map_path: "/workspaces/RMCS/rmcs_ws/src/rmcs-navigation-deps/rmcs-relocation/maps/1.pcd"
+    map_path: "/workspaces/RMCS/rmcs_ws/src/rmcs-navigation-deps/rmcs_relocation/maps/1.pcd"
     # map_path: "/tmp/point-lio/1.pcd"
     # 全局 SC 描述子库路径
-    descriptor_path: "/workspaces/RMCS/rmcs_ws/src/rmcs-navigation-deps/rmcs-relocation/maps/1.sc_desc"
+    descriptor_path: "/workspaces/RMCS/rmcs_ws/src/rmcs-navigation-deps/rmcs_relocation/maps/1.sc_desc"
     world_frame: "world"
     odom_frame: "odom"
     base_frame: "base_link"
@@ -79,7 +79,7 @@ rmcs_relocation:
         refine_yaw_step_deg: 6.0
 
         # [2-4] map consistency filter（默认关）
-        enable_map_consistency_filter: false
+        enable_map_consistency_filter: true
         map_consistency_distance_m: 0.8
         min_retained_fraction: 0.15
 
@@ -87,17 +87,17 @@ rmcs_relocation:
         sc_top_k: 2
 
         # [2-6] 验收阈值（max_distance_from_prior_m 关键：拦跨半场。RMUC 镜像最近 ~7m）
-        score_threshold: 0.40
+        score_threshold: 0.50
         min_inlier_ratio: 0.08
         max_distance_from_prior_m: 6.0
         max_yaw_from_prior_deg: 90.0
         field_bounds:
-          min_x: -10.0
-          max_x: 10.0
-          min_y: -10.5
-          max_y: 10.5
-          min_z: -5.0
-          max_z: 5.0
+          min_x: -2.0
+          max_x: 7.0
+          min_y: -5.5
+          max_y: 5.5
+          min_z: -1.0
+          max_z: 1.0
 
 
     # wide.* — 全局兜底 (MODE_WIDE=2)

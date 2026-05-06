@@ -1,0 +1,16 @@
+uint8 MODE_INITIAL=0
+uint8 MODE_LOCAL=1
+uint8 MODE_WIDE=2
+
+uint8 mode
+geometry_msgs/Pose initial_guess_world_base
+string pointcloud_topic
+float32 collect_duration_sec
+---
+bool success
+string message
+geometry_msgs/Pose estimated_world_base
+geometry_msgs/Transform world_to_odom
+float32 fitness_score
+bool within_field_bounds
+float32 confidence
