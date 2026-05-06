@@ -56,7 +56,7 @@ auto pose_is_finite(const geometry_msgs::msg::Pose& pose) -> bool {
 ///   - query 描述子在 odom 系朝向构造（translate_to_robot_frame 仅 XY 平移，不旋转）
 ///   - 因此 SC 列位移找到的 yaw（match.yaw_deg）= world_to_odom 的 yaw（α）
 ///   - 真实 world_to_base.yaw = α + odom_to_base.yaw（β），β 来自 LIO
-///   - seed.translation 是 grid 中心的 world 坐标，照填即可
+///   - seed.translation 是 grid 中心的 world 坐标
 auto sc_match_to_seed(const ScanContextMatch& match, const Eigen::Isometry3f& odom_to_base)
     -> Eigen::Isometry3f {
     const auto sc_yaw_radian = static_cast<float>(match.yaw_deg * std::numbers::pi / 180.0);
@@ -124,7 +124,6 @@ auto build_wide_fallback_seeds(
     return seeds;
 }
 
-/// 拼接 "<mode> registration rejected: tag1,tag2,..." —— INITIAL/LOCAL/WIDE 共用
 auto build_validation_failure_message(
     std::string_view mode, const ValidationResult& validation, bool include_inlier) -> std::string {
     const auto add = [](std::string& msg, bool failed, std::string_view tag, bool& first) {
