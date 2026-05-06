@@ -27,9 +27,9 @@
 #include <geometry_msgs/msg/pose.hpp>
 #include <geometry_msgs/msg/transform.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
+#include <pcl/common/transforms.h>
 #include <pcl/io/pcd_io.h>
 #include <pcl/kdtree/kdtree_flann.h>
-#include <pcl/common/transforms.h>
 #include <rclcpp/qos.hpp>
 #include <rmcs_relocation/srv/relocalize.hpp>
 #include <tf2/exceptions.h>
@@ -67,8 +67,7 @@ auto sc_match_to_seed(const ScanContextMatch& match, const Eigen::Isometry3f& od
 
     auto seed = Eigen::Isometry3f::Identity();
     seed.translation() = match.world_position;
-    seed.linear() =
-        Eigen::AngleAxisf{seed_yaw_radian, Eigen::Vector3f::UnitZ()}.toRotationMatrix();
+    seed.linear() = Eigen::AngleAxisf{seed_yaw_radian, Eigen::Vector3f::UnitZ()}.toRotationMatrix();
     return seed;
 }
 
@@ -92,28 +91,48 @@ auto translate_to_robot_frame(
     return robot_centered;
 }
 
-/// fallback 路径的种子布局：以 center 为中心的 5 个位置（中心 + 4 个方向）× yaw_count 个均匀 yaw。
-/// SC 库不可用或返回空时使用，不做位置 prior 假设。半径与 yaw 数由 YAML 配。
-auto build_wide_fallback_seeds(
-    const Eigen::Vector3f& center, double position_radius_m, int yaw_count)
-    -> std::vector<Eigen::Isometry3f> {
+auto build_cross_positions(const Eigen::Vector3f& center, double position_radius_m)
+    -> std::array<Eigen::Vector3f, 5> {
     const auto radius = static_cast<float>(position_radius_m);
-    const auto yaws = std::max(1, yaw_count);
-
-    const auto positions = std::array<Eigen::Vector3f, 5>{
+    return {
         center,
         center + Eigen::Vector3f{radius, 0.0F, 0.0F},
         center + Eigen::Vector3f{-radius, 0.0F, 0.0F},
         center + Eigen::Vector3f{0.0F, radius, 0.0F},
         center + Eigen::Vector3f{0.0F, -radius, 0.0F},
     };
+}
+
+auto build_symmetric_yaw_offsets(int yaw_count) -> std::vector<double> {
+    const auto yaws = std::max(1, yaw_count);
+    const auto yaw_step = 2.0 * std::numbers::pi / static_cast<double>(yaws);
+
+    auto yaw_offsets = std::vector<double>{0.0};
+    yaw_offsets.reserve(static_cast<std::size_t>(yaws));
+    for (int k = 1; static_cast<int>(yaw_offsets.size()) < yaws; ++k) {
+        const auto offset = static_cast<double>(k) * yaw_step;
+        yaw_offsets.push_back(offset);
+        if (static_cast<int>(yaw_offsets.size()) >= yaws)
+            break;
+        yaw_offsets.push_back(-offset);
+    }
+    return yaw_offsets;
+}
+
+/// fallback 路径的种子布局：以 center 为中心的 5 个位置（中心 + 4 个方向）× yaw_count 个均匀 yaw。
+/// yaw 从当前 odom yaw 开始对称展开，避免机器人已转向时 fallback 仍从世界 0° 硬撞。
+auto build_wide_fallback_seeds(
+    const Eigen::Vector3f& center, double position_radius_m, int yaw_count, double yaw_center_deg)
+    -> std::vector<Eigen::Isometry3f> {
+    const auto positions = build_cross_positions(center, position_radius_m);
+    const auto yaw_offsets = build_symmetric_yaw_offsets(yaw_count);
+    const auto yaw_center_radian = yaw_center_deg * std::numbers::pi / 180.0;
 
     auto seeds = std::vector<Eigen::Isometry3f>{};
-    seeds.reserve(positions.size() * static_cast<std::size_t>(yaws));
+    seeds.reserve(positions.size() * yaw_offsets.size());
     for (const auto& position : positions) {
-        for (int i = 0; i < yaws; ++i) {
-            const auto yaw_radian = static_cast<float>(
-                static_cast<double>(i) * 2.0 * std::numbers::pi / static_cast<double>(yaws));
+        for (const auto yaw_offset : yaw_offsets) {
+            const auto yaw_radian = static_cast<float>(yaw_center_radian + yaw_offset);
             auto seed = Eigen::Isometry3f::Identity();
             seed.translation() = position;
             seed.linear() =
@@ -127,7 +146,8 @@ auto build_wide_fallback_seeds(
 auto build_validation_failure_message(
     std::string_view mode, const ValidationResult& validation, bool include_inlier) -> std::string {
     const auto add = [](std::string& msg, bool failed, std::string_view tag, bool& first) {
-        if (!failed) return;
+        if (!failed)
+            return;
         msg += first ? ": " : ",";
         msg += tag;
         first = false;
@@ -147,13 +167,13 @@ auto extract_yaw_deg(const Eigen::Isometry3f& pose) -> double {
     return std::atan2(
                static_cast<double>(pose.rotation()(1, 0)),
                static_cast<double>(pose.rotation()(0, 0)))
-        * 180.0 / std::numbers::pi;
+         * 180.0 / std::numbers::pi;
 }
 
 } // namespace
 
 struct RelocalizationServer::Impl {
-    //在 handle_relocalize 中标记 busy，析构时自动清除。确保同一时刻只有一条重定位请求在处理。
+    // 在 handle_relocalize 中标记 busy，析构时自动清除。确保同一时刻只有一条重定位请求在处理。
     struct BusyGuard {
         explicit BusyGuard(Impl& impl)
             : impl_(impl) {}
@@ -194,7 +214,7 @@ struct RelocalizationServer::Impl {
             node_.create_wall_timer(publish_interval, [this] { publish_current_world_to_odom(); });
     }
 
-    //从 ROS 参数服务器一次性加载全部运行时参数
+    // 从 ROS 参数服务器一次性加载全部运行时参数
     void load_parameters() {
         auto params = tools::load_runtime_params(node_);
         map_path_ = std::move(params.map_path);
@@ -221,7 +241,7 @@ struct RelocalizationServer::Impl {
         log_failure_details_ = params.log_failure_details;
     }
 
-    //初始化子模块：点云收集器、验证器
+    // 初始化子模块：点云收集器、验证器
     void initialize_modules() {
         collector_ = std::make_unique<Collector>(odom_frame_);
         validator_ = std::make_unique<Validator>(
@@ -238,7 +258,7 @@ struct RelocalizationServer::Impl {
         current_world_to_odom_ = initial;
     }
 
-    //加载 PCD 地图文件并构建 KD 树；若提供 descriptor_path 则尝试加载 SC 描述子库
+    // 加载 PCD 地图文件并构建 KD 树；若提供 descriptor_path 则尝试加载 SC 描述子库
     void load_map() {
         map_cloud_ = std::make_shared<PointCloud>();
         if (map_path_.empty()) {
@@ -380,9 +400,8 @@ struct RelocalizationServer::Impl {
     /// 把 query 点云搬到机器人本体系 → 构 SC 描述子 → 在描述子库做 top-K 旋转不变匹配。
     /// SC 不可用 / 描述子库返回空时返回空 vector。local 与 wide 共用。
     auto query_sc_matches(
-        const std::shared_ptr<PointCloud>& query_odom_cloud,
-        const Eigen::Isometry3f& odom_to_base, std::size_t top_k) const
-        -> std::vector<ScanContextMatch> {
+        const std::shared_ptr<PointCloud>& query_odom_cloud, const Eigen::Isometry3f& odom_to_base,
+        std::size_t top_k) const -> std::vector<ScanContextMatch> {
         if (!scan_context_available_)
             return {};
         const auto query_local = translate_to_robot_frame(query_odom_cloud, odom_to_base);
@@ -390,7 +409,7 @@ struct RelocalizationServer::Impl {
         return map_descriptor_db_.query(query_descriptor, top_k);
     }
 
-    //更新 world->odom 变换
+    // 更新 world->odom 变换
     void update_and_publish_world_to_odom(const Eigen::Isometry3f& world_to_odom) {
         auto new_transform = geometry_msgs::msg::TransformStamped{};
         new_transform.header.frame_id = world_frame_;
@@ -425,11 +444,11 @@ struct RelocalizationServer::Impl {
             return;
         }
 
-        //构建初始guess变换
+        // 构建初始guess变换
         const auto world_to_base_guess = tools::pose_to_isometry(request.initial_guess_world_base);
         const auto world_to_odom_guess = world_to_base_guess * odom_to_base_now.inverse();
 
-        //收集验证点云数据
+        // 收集验证点云数据
         const auto query_result = collect_and_validate_points(
             request, initial_runtime_config_.pointcloud_topic,
             initial_runtime_config_.collect_duration_sec,
@@ -439,7 +458,7 @@ struct RelocalizationServer::Impl {
             return;
         }
 
-        //提取子地图
+        // 提取子地图
         auto map_submap = extract_submap(
             world_to_base_guess.translation(), initial_runtime_config_.submap_radius_m);
         if (!map_submap || map_submap->empty()) {
@@ -457,7 +476,7 @@ struct RelocalizationServer::Impl {
             return;
         }
 
-        //查询最终odom->base坐标变换
+        // 查询最终odom->base坐标变换
         auto odom_to_base_final = Eigen::Isometry3f::Identity();
         if (!lookup_odom_to_base(odom_to_base_final)) {
             response.message = "failed to query odom->base after registration";
@@ -465,7 +484,7 @@ struct RelocalizationServer::Impl {
         }
         const auto world_to_base_estimated = world_to_odom_result * odom_to_base_final;
 
-        //验证结果
+        // 验证结果
         const auto validation =
             validator_->evaluate_initial(world_to_base_guess, world_to_base_estimated, score);
 
@@ -485,7 +504,7 @@ struct RelocalizationServer::Impl {
                                            std::atan2(
                                                std::sin(estimated_yaw - guessed_yaw),
                                                std::cos(estimated_yaw - guessed_yaw)))
-                * 180.0 / std::numbers::pi;
+                                     * 180.0 / std::numbers::pi;
             const auto distance_error_m =
                 (world_to_base_estimated.translation() - world_to_base_guess.translation()).norm();
 
@@ -493,8 +512,8 @@ struct RelocalizationServer::Impl {
                 build_validation_failure_message("initial", validation, /*include_inlier=*/false);
             RCLCPP_WARN(
                 node_.get_logger(),
-                "initial rejected: score=%.4f/%.4f, distance=%.3f/%.3f, yaw_deg=%.2f/%.2f",
-                score, initial_validation_config_.score_threshold, distance_error_m,
+                "initial rejected: score=%.4f/%.4f, distance=%.3f/%.3f, yaw_deg=%.2f/%.2f", score,
+                initial_validation_config_.score_threshold, distance_error_m,
                 initial_validation_config_.initial_max_translation_error_m, yaw_error_deg,
                 initial_validation_config_.initial_max_yaw_error_deg);
             return;
@@ -506,7 +525,8 @@ struct RelocalizationServer::Impl {
         response.message = "ok";
     }
 
-    /// 一次 local seed 尝试的结果：accepted=填响应并 return；rejected=记 message 进 continue；abort=致命错（lookup tf 失败）。
+    /// 一次 local seed 尝试的结果：accepted=填响应并 return；rejected=记 message 进
+    /// continue；abort=致命错（lookup tf 失败）。
     enum class LocalSeedOutcome { Accepted, Rejected, Abort };
 
     /// 跑一个 SC seed 的完整 GICP + validator 流程。accepted 时填好 response 并 publish。
@@ -515,8 +535,7 @@ struct RelocalizationServer::Impl {
     auto try_local_seed(
         std::size_t seed_index, const ScanContextMatch& match,
         const std::shared_ptr<PointCloud>& query_cloud,
-        const Eigen::Isometry3f& odom_to_base_before,
-        const Eigen::Isometry3f& user_world_to_base,
+        const Eigen::Isometry3f& odom_to_base_before, const Eigen::Isometry3f& user_world_to_base,
         rmcs_relocation::srv::Relocalize::Response& response, std::string& last_msg)
         -> LocalSeedOutcome {
         const auto sc_seed = sc_match_to_seed(match, odom_to_base_before);
@@ -542,8 +561,7 @@ struct RelocalizationServer::Impl {
             return LocalSeedOutcome::Abort;
         }
 
-        const auto world_to_base_estimated =
-            registration_result.world_to_odom * odom_to_base_after;
+        const auto world_to_base_estimated = registration_result.world_to_odom * odom_to_base_after;
 
         // validator 用 user prior 作参考（拦跨半场错配）
         const auto validator_prior = RegistrationPrior{
@@ -558,8 +576,33 @@ struct RelocalizationServer::Impl {
         if (!validation.accepted) {
             last_msg = build_validation_failure_message(
                 "local seed[" + std::to_string(seed_index) + "]", validation, true);
+            RCLCPP_WARN(
+                node_.get_logger(), "local: seed[%zu] rejected g_score=%.4f inlier=%.3f | %s",
+                seed_index, registration_result.score, registration_result.inlier_ratio,
+                last_msg.c_str());
             return LocalSeedOutcome::Rejected;
         }
+
+        const auto estimated_yaw_deg = extract_yaw_deg(world_to_base_estimated);
+        const auto prior_yaw_deg = extract_yaw_deg(user_world_to_base);
+        const auto distance_error_m =
+            (world_to_base_estimated.translation() - user_world_to_base.translation()).norm();
+        const auto yaw_error_deg =
+            std::abs(
+                std::atan2(
+                    std::sin((estimated_yaw_deg - prior_yaw_deg) * std::numbers::pi / 180.0),
+                    std::cos((estimated_yaw_deg - prior_yaw_deg) * std::numbers::pi / 180.0)))
+            * 180.0 / std::numbers::pi;
+        // 调参诊断日志：记录 local 验收通过后的最终估计位姿，区别于 SC seed 网格中心。
+        RCLCPP_INFO(
+            node_.get_logger(),
+            "local: seed[%zu] accepted estimated=(%.2f,%.2f,%.1fdeg) "
+            "prior=(%.2f,%.2f,%.1fdeg) score=%.4f inlier=%.3f dist=%.3fm yaw_err=%.1fdeg",
+            seed_index, world_to_base_estimated.translation().x(),
+            world_to_base_estimated.translation().y(), estimated_yaw_deg,
+            user_world_to_base.translation().x(), user_world_to_base.translation().y(),
+            prior_yaw_deg, registration_result.score, registration_result.inlier_ratio,
+            distance_error_m, yaw_error_deg);
 
         response.estimated_world_base = tools::isometry_to_pose(world_to_base_estimated);
         response.world_to_odom = tools::isometry_to_transform(registration_result.world_to_odom);
@@ -613,8 +656,7 @@ struct RelocalizationServer::Impl {
             return;
         }
 
-        const auto user_world_to_base =
-            tools::pose_to_isometry(request.initial_guess_world_base);
+        const auto user_world_to_base = tools::pose_to_isometry(request.initial_guess_world_base);
         auto last_msg = std::string{"local: all SC seeds failed"};
 
         for (std::size_t i = 0; i < matches.size(); ++i) {
@@ -622,7 +664,7 @@ struct RelocalizationServer::Impl {
                 i, matches[i], query_result.cloud, odom_to_base_before, user_world_to_base,
                 response, last_msg)) {
             case LocalSeedOutcome::Accepted: return;
-            case LocalSeedOutcome::Abort:    return;
+            case LocalSeedOutcome::Abort: return;
             case LocalSeedOutcome::Rejected: continue;
             }
         }
@@ -645,23 +687,25 @@ struct RelocalizationServer::Impl {
     /// SC 路径专用 wide config：种子带准 yaw，关掉 yaw sweep 让 GICP 直接收敛
     auto make_sc_wide_config() const -> WideRegistrationConfig {
         auto config = wide_registration_config_;
-        config.yaw_window_deg = 6.0;
+        config.yaw_window_deg = 12.0;
         config.coarse_yaw_step_deg = 6.0;
+        config.refine_yaw_step_deg = 6.0;
         return config;
     }
 
-    /// fallback 路径专用 wide config：YAML 接管除全向 yaw 扫和 coarse score 安全下限外的所有参数
+    /// fallback 路径专用 wide config：yaw 已由 fallback_yaw_count 离散枚举，局部 yaw window 由 YAML
+    /// 控制。
     auto make_fallback_wide_config() const -> WideRegistrationConfig {
         auto config = wide_registration_config_;
-        config.yaw_window_deg = 180.0;
         config.coarse_score_threshold = std::max(config.coarse_score_threshold, 0.15);
         return config;
     }
 
     /// 完成一次 wide attempt：算 estimated → validator → 装填 response。
     /// 验收通过返回 true（同时 publish world_to_odom 和置 response.success）。
-    auto finalize_wide_attempt(
-        WideRequestCtx& ctx, const RegistrationResult& attempt, WidePath path) -> bool {
+    auto
+        finalize_wide_attempt(WideRequestCtx& ctx, const RegistrationResult& attempt, WidePath path)
+            -> bool {
         auto odom_to_base_after = Eigen::Isometry3f::Identity();
         if (!lookup_odom_to_base(odom_to_base_after)) {
             ctx.response.message = "failed to query odom->base after registration";
@@ -700,46 +744,66 @@ struct RelocalizationServer::Impl {
     }
 
     /// 跑一组 seeds 走 wide pipeline：seeds 空 / GICP 全失败 → 写诊断 message 返回 false。
-    auto try_wide_path(
-        WideRequestCtx& ctx, WidePath path, std::vector<Eigen::Isometry3f> seeds) -> bool {
+    auto try_wide_path(WideRequestCtx& ctx, WidePath path, std::vector<Eigen::Isometry3f> seeds)
+        -> bool {
         if (seeds.empty()) {
             ctx.response.message =
                 (path == WidePath::ScanContext) ? "wide SC seed empty" : "wide fallback seed empty";
             return false;
         }
 
-        auto registration_result = RegistrationResult{};
         const auto& attempt_config =
             (path == WidePath::Fallback) ? ctx.fallback_config : ctx.sc_config;
-        if (!tools::run_wide(
-                initial_registration_config_, attempt_config, ctx.query_cloud, map_cloud_,
-                map_kdtree_, ctx.registration_prior, seeds, registration_result)) {
-            ctx.response.message = (path == WidePath::ScanContext)
-                ? "wide registration failed (path=scan_context)"
-                : "wide registration failed (path=fallback)";
+        const auto path_label = (path == WidePath::ScanContext) ? "scan_context" : "fallback";
+        const auto runner = tools::WideSeedRunner{
+            initial_registration_config_, attempt_config, ctx.query_cloud, map_cloud_, map_kdtree_,
+            ctx.registration_prior};
+        if (!runner.valid()) {
+            ctx.response.message = "wide query preprocess failed";
             return false;
         }
-        return finalize_wide_attempt(ctx, registration_result, path);
+
+        auto last_message = std::string{"no seed converged"};
+        for (std::size_t i = 0; i < seeds.size(); ++i) {
+            RCLCPP_INFO(
+                node_.get_logger(), "wide: try path=%s seed[%zu/%zu]", path_label, i + 1,
+                seeds.size());
+
+            auto registration_result = RegistrationResult{};
+            if (!runner.run(seeds[i], registration_result)) {
+                last_message = "seed[" + std::to_string(i) + "] registration failed";
+                continue;
+            }
+
+            // 调参诊断日志：wide/fallback 找到第一个通过 validator 的 seed
+            // 后立即早停，避免全量遍历。
+            if (finalize_wide_attempt(ctx, registration_result, path))
+                return true;
+            last_message = ctx.response.message;
+        }
+
+        ctx.response.message =
+            std::string{"wide registration failed (path="} + path_label + "): " + last_message;
+        return false;
     }
 
     /// 接受时的详细日志：分 has_prior / no_prior 两条格式
     void log_wide_accepted(
-        const WideRequestCtx& ctx, WidePath path,
-        const Eigen::Isometry3f& world_to_base_estimated,
+        const WideRequestCtx& ctx, WidePath path, const Eigen::Isometry3f& world_to_base_estimated,
         const RegistrationResult& attempt) const {
         const auto path_label = (path == WidePath::ScanContext) ? "scan_context" : "fallback";
         const auto estimated_yaw_deg = extract_yaw_deg(world_to_base_estimated);
 
         if (ctx.validator_prior.has_prior) {
             const auto prior_yaw_deg = extract_yaw_deg(ctx.validator_prior.world_to_base);
-            const auto distance_error_m =
-                (world_to_base_estimated.translation()
-                 - ctx.validator_prior.world_to_base.translation())
-                    .norm();
+            const auto distance_error_m = (world_to_base_estimated.translation()
+                                           - ctx.validator_prior.world_to_base.translation())
+                                              .norm();
             const auto yaw_error_deg =
-                std::abs(std::atan2(
-                    std::sin((estimated_yaw_deg - prior_yaw_deg) * std::numbers::pi / 180.0),
-                    std::cos((estimated_yaw_deg - prior_yaw_deg) * std::numbers::pi / 180.0)))
+                std::abs(
+                    std::atan2(
+                        std::sin((estimated_yaw_deg - prior_yaw_deg) * std::numbers::pi / 180.0),
+                        std::cos((estimated_yaw_deg - prior_yaw_deg) * std::numbers::pi / 180.0)))
                 * 180.0 / std::numbers::pi;
             RCLCPP_INFO(
                 node_.get_logger(),
@@ -748,8 +812,8 @@ struct RelocalizationServer::Impl {
                 path_label, world_to_base_estimated.translation().x(),
                 world_to_base_estimated.translation().y(), estimated_yaw_deg,
                 ctx.validator_prior.world_to_base.translation().x(),
-                ctx.validator_prior.world_to_base.translation().y(), prior_yaw_deg,
-                attempt.score, attempt.inlier_ratio, distance_error_m, yaw_error_deg);
+                ctx.validator_prior.world_to_base.translation().y(), prior_yaw_deg, attempt.score,
+                attempt.inlier_ratio, distance_error_m, yaw_error_deg);
         } else {
             RCLCPP_INFO(
                 node_.get_logger(),
@@ -813,7 +877,8 @@ struct RelocalizationServer::Impl {
             seed_count, center.x(), center.y(), ctx.fallback_config.submap_radius_m,
             ctx.fallback_config.yaw_window_deg, ctx.fallback_config.coarse_yaw_step_deg,
             ctx.fallback_config.coarse_iterations, ctx.fallback_config.refine_iterations,
-            ctx.fallback_config.precise_iterations, ctx.fallback_config.max_correspondence_distance_m,
+            ctx.fallback_config.precise_iterations,
+            ctx.fallback_config.max_correspondence_distance_m,
             ctx.fallback_config.coarse_score_threshold);
         RCLCPP_INFO(
             node_.get_logger(),
@@ -842,8 +907,7 @@ struct RelocalizationServer::Impl {
 
         const auto query_result = collect_and_validate_points(
             request, wide_runtime_config_.pointcloud_topic,
-            wide_runtime_config_.collect_duration_sec,
-            wide_runtime_config_.min_accumulated_points);
+            wide_runtime_config_.collect_duration_sec, wide_runtime_config_.min_accumulated_points);
         if (!query_result.ok) {
             response.message = query_result.error_message;
             return;
@@ -858,11 +922,12 @@ struct RelocalizationServer::Impl {
         validator_prior.odom_to_base = odom_to_base_before;
         if (pose_is_finite(request.initial_guess_world_base)) {
             validator_prior.has_prior = true;
-            validator_prior.world_to_base = tools::pose_to_isometry(request.initial_guess_world_base);
+            validator_prior.world_to_base =
+                tools::pose_to_isometry(request.initial_guess_world_base);
         } else {
             RCLCPP_WARN(
-                node_.get_logger(),
-                "wide: request initial_guess_world_base has NaN/Inf, disable prior-based validation");
+                node_.get_logger(), "wide: request initial_guess_world_base has NaN/Inf, disable "
+                                    "prior-based validation");
         }
 
         auto ctx = WideRequestCtx{
@@ -880,12 +945,13 @@ struct RelocalizationServer::Impl {
             return;
 
         // fallback 多 seed
-        const auto fallback_center = validator_prior.has_prior
-            ? Eigen::Vector3f{validator_prior.world_to_base.translation()}
-            : Eigen::Vector3f::Zero();
+        const auto fallback_center =
+            validator_prior.has_prior ? Eigen::Vector3f{validator_prior.world_to_base.translation()}
+                                      : Eigen::Vector3f::Zero();
+        const auto fallback_yaw_center_deg = extract_yaw_deg(odom_to_base_before);
         auto fallback_seeds = build_wide_fallback_seeds(
             fallback_center, wide_registration_config_.fallback_position_radius_m,
-            wide_registration_config_.fallback_yaw_count);
+            wide_registration_config_.fallback_yaw_count, fallback_yaw_center_deg);
         log_wide_fallback_setup(ctx, fallback_center, fallback_seeds.size());
 
         if (try_wide_path(ctx, WidePath::Fallback, std::move(fallback_seeds)))
@@ -947,8 +1013,8 @@ struct RelocalizationServer::Impl {
             node_.get_logger(),
             "relocalize_failed mode=%.*s prior=(%.2f,%.2f,%.2f) score=%.4f conf=%.3f | %s",
             static_cast<int>(mode.size()), mode.data(), p.x, p.y, p.z,
-            static_cast<double>(response.fitness_score),
-            static_cast<double>(response.confidence), response.message.c_str());
+            static_cast<double>(response.fitness_score), static_cast<double>(response.confidence),
+            response.message.c_str());
     }
 
     RelocalizationServer& node_;

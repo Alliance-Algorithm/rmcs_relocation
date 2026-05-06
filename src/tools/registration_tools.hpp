@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <limits>
 #include <memory>
+#include <vector>
 
 #include <Eigen/Geometry>
 #include <pcl/kdtree/kdtree_flann.h>
@@ -120,51 +121,76 @@ auto transform_pointcloud(
     const PointCloud& source, const Eigen::Isometry3f& transform, PointCloud& target) -> bool;
 
 auto extract_submap_radius(
-    const std::shared_ptr<PointCloud>& map_world_cloud,
-    const Eigen::Vector3f& center,
-    double radius_m,
-    double fallback_radius_m) -> std::shared_ptr<PointCloud>;
+    const std::shared_ptr<PointCloud>& map_world_cloud, const Eigen::Vector3f& center,
+    double radius_m, double fallback_radius_m) -> std::shared_ptr<PointCloud>;
 
 auto extract_submap_radius(
-    const pcl::KdTreeFLANN<Point>& kdtree,
-    const std::shared_ptr<PointCloud>& map_world_cloud,
-    const Eigen::Vector3f& center,
-    double radius_m,
-    double fallback_radius_m) -> std::shared_ptr<PointCloud>;
+    const pcl::KdTreeFLANN<Point>& kdtree, const std::shared_ptr<PointCloud>& map_world_cloud,
+    const Eigen::Vector3f& center, double radius_m, double fallback_radius_m)
+    -> std::shared_ptr<PointCloud>;
 
 auto run_initial(
     const InitialRegistrationConfig& initial_config,
     const std::shared_ptr<PointCloud>& query_odom_cloud,
     const std::shared_ptr<PointCloud>& map_world_cloud,
-    const Eigen::Isometry3f& world_to_odom_guess,
-    Eigen::Isometry3f& world_to_odom_result,
+    const Eigen::Isometry3f& world_to_odom_guess, Eigen::Isometry3f& world_to_odom_result,
     double& score) -> bool;
 
 /**
  * @brief LOCAL 重定位：单 seed 走多阶段 GICP，依赖 prior 准确
  */
 auto run_local(
-    const InitialRegistrationConfig& initial_config,
-    const LocalRegistrationConfig& local_config,
+    const InitialRegistrationConfig& initial_config, const LocalRegistrationConfig& local_config,
     const std::shared_ptr<PointCloud>& query_odom_cloud,
-    const std::shared_ptr<PointCloud>& map_world_cloud,
-    const pcl::KdTreeFLANN<Point>& map_kdtree,
-    const RegistrationPrior& prior,
+    const std::shared_ptr<PointCloud>& map_world_cloud, const pcl::KdTreeFLANN<Point>& map_kdtree,
+    const RegistrationPrior& prior, RegistrationResult& result) -> bool;
+
+/**
+ * @brief WIDE 单 seed runner：构造时预处理 query，run() 逐 seed 复用。
+ *
+ * runtime 的 SC / fallback 路径需要逐 seed 早停；用 runner 避免每个 seed 重复 voxel/outlier。
+ */
+class WideSeedRunner {
+    InitialRegistrationConfig initial_config_;
+    WideRegistrationConfig wide_config_;
+    std::shared_ptr<PointCloud> filtered_query_;
+    std::shared_ptr<PointCloud> map_world_cloud_;
+    const pcl::KdTreeFLANN<Point>& map_kdtree_;
+    RegistrationPrior prior_;
+
+public:
+    WideSeedRunner(
+        const InitialRegistrationConfig& initial_config, const WideRegistrationConfig& wide_config,
+        const std::shared_ptr<PointCloud>& query_odom_cloud,
+        const std::shared_ptr<PointCloud>& map_world_cloud,
+        const pcl::KdTreeFLANN<Point>& map_kdtree, const RegistrationPrior& prior);
+
+    [[nodiscard]] auto valid() const -> bool;
+
+    [[nodiscard]] auto
+        run(const Eigen::Isometry3f& seed_world_to_base, RegistrationResult& result) const -> bool;
+};
+
+/**
+ * @brief WIDE 重定位：单 seed 跑完整 GICP 管线。
+ */
+auto run_wide_seed(
+    const InitialRegistrationConfig& initial_config, const WideRegistrationConfig& wide_config,
+    const std::shared_ptr<PointCloud>& query_odom_cloud,
+    const std::shared_ptr<PointCloud>& map_world_cloud, const pcl::KdTreeFLANN<Point>& map_kdtree,
+    const RegistrationPrior& prior, const Eigen::Isometry3f& seed_world_to_base,
     RegistrationResult& result) -> bool;
 
 /**
- * @brief WIDE 重定位：对外部传入的 seed 列表逐个跑 TwoStageGicp，按 ranking 选最优
+ * @brief WIDE 重定位：多 seed 跑 GICP 后按 ranking 选最优。
  *
- * seed 来源由 caller 决定（SC 主路径 or fallback 路径）。
+ * 保留给需要“一次性评估一组 seed”的调用方；SC / fallback 早停路径通常用 run_wide_seed。
  */
 auto run_wide(
-    const InitialRegistrationConfig& initial_config,
-    const WideRegistrationConfig& wide_config,
+    const InitialRegistrationConfig& initial_config, const WideRegistrationConfig& wide_config,
     const std::shared_ptr<PointCloud>& query_odom_cloud,
-    const std::shared_ptr<PointCloud>& map_world_cloud,
-    const pcl::KdTreeFLANN<Point>& map_kdtree,
-    const RegistrationPrior& prior,
-    const std::vector<Eigen::Isometry3f>& seeds_world_to_base,
+    const std::shared_ptr<PointCloud>& map_world_cloud, const pcl::KdTreeFLANN<Point>& map_kdtree,
+    const RegistrationPrior& prior, const std::vector<Eigen::Isometry3f>& seeds_world_to_base,
     RegistrationResult& result) -> bool;
 
 } // namespace rmcs::location::tools
