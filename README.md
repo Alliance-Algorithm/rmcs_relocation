@@ -42,63 +42,20 @@ sudo apt install -y \
 ```
 
 
-## 服务接口（`srv/Relocalize.srv`）
-
-```
-uint8 MODE_INITIAL=0
-uint8 MODE_LOCAL=1
-uint8 MODE_WIDE=2
-
-uint8 mode
-geometry_msgs/Pose initial_guess_world_base
-string pointcloud_topic
-float32 collect_duration_sec
----
-bool success
-string message
-geometry_msgs/Pose estimated_world_base
-geometry_msgs/Transform world_to_odom
-float32 fitness_score
-bool within_field_bounds
-float32 confidence
-```
-
 ## Lua 调用方式（`rmcs-navigation/src/lua/action.lua`）
 
 ```lua
 -- 阻塞等待结果，返回 (ok: bool, status: table | nil)
-action:relocalize("initial", x, y, yaw)
-action:relocalize("local_", x, y, yaw)
-action:relocalize_wide(x, y, yaw)
+action:relocalize_initial(0, 0, 0)
+action:relocalize_local() 
+action:relocalize_wide()
 
--- local 失败自动降级 wide；LIO/TF 丢失时直接 wide+原点
-action:try_relocalize_local_then_wide()
 
 -- 非阻塞状态查询
 local st = action:relocalize_status()
 -- st = { state, message, fitness_score, confidence,
 --        estimated_x, estimated_y, estimated_z,
 --        estimated_qx, estimated_qy, estimated_qz, estimated_qw }
-```
-
-## bringup 配置
-
-`rmcs_bringup/config/{navigation,sentry}.yaml`：
-
-```yaml
-rmcs_navigation:
-  ros__parameters:
-    endpoint: "main"
-    enable_relocalization: true
-```
-
-## 构建
-
-```bash
-cd /workspaces/RMCS/rmcs_ws
-source /opt/ros/jazzy/setup.bash
-build-rmcs
-source install/setup.bash
 ```
 
 ## 启动
@@ -139,45 +96,4 @@ scan_context:
     num_rings: 20
     num_sectors: 60
     max_radius_m: 20.0    # 必须与 generator 完全一致，否则启动时 hash mismatch
-```
-
-
-## 调试
-
-`config/location.yaml`：
-
-```yaml
-diagnostics:
-    log_failure_details: true   # 每次失败 dispatcher 多打一行：mode + prior + score + conf + msg
-```
-
-## 各模块功能
-
-| 模块 | 主要职责 |
-| --- | --- |
-| `src/server/runtime.*` | 服务主流程、参数加载、地图加载、三 mode dispatcher、TF 发布、SC bootstrap |
-| `src/server/collector.*` | 点云采集与坐标系转换（输入 topic，输出 odom 点云） |
-| `src/server/validator.*` | 三 mode 验收：边界、score、inlier、prior 距离 / yaw |
-| `src/server/map_descriptor_db.*` | `.sc_desc` 加载 + map_hash 校验 + top-K 查询 |
-| `src/tools/registration_tools.*` | `run_initial / run_local / run_wide` 配准核心 |
-| `src/tools/scan_context.*` | SC 描述子构造 + 旋转不变匹配 + map hash（FNV-1a，与 Python 同构） |
-| `src/tools/param_tools.*` | yaml 参数加载 |
-| `scripts/generate_map_descriptors.py` | 离线生成 `.sc_desc`（与 C++ 字节序、采样规则、哈希严格同构） |
-
-## 配置参数
-
-详见 `config/location.yaml`。顶层结构：
-
-```yaml
-rmcs_relocation:
-  ros__parameters:
-    map_path: ...
-    descriptor_path: ""               # 留空则关 SC
-
-    scan_context:                     # SC 描述子参数（与 generator 必须一致）
-      num_rings, num_sectors, max_radius_m
-
-    diagnostics:                      # 调试日志
-      log_failure_details: false
-
 ```

@@ -8,7 +8,8 @@
 
 **新方案**：MODE_LOCAL 改为 SC 选种子，prior 仅作 validator 安全网。运动中工作。
 
-预期单次 ~1.3s，错配兜底 ~2.1s（仍快于降级 wide 的 ~5s）。
+预期单次 ~1.3s，错配兜底 ~2.1s。Local 与 wide 在 Lua 策略层独立：local
+失败后立即重试直到成功；wide 只作为上层显式触发的停车大兜底。
 
 > **前置已就绪**（wide SC 主路径上线后实测验证，2026-05-05）：
 > - `sc_match_to_seed(match, odom_to_base)` 双参签名 — yaw 必须 = SC yaw (α) + odom_to_base.yaw (β)
@@ -27,9 +28,9 @@
 |---|---|
 | seed 1 命中（95%+ 场景） | ~1.3s |
 | seed 1 错配被拦 → seed 2 命中 | ~2.1s |
-| 都不行 → Lua 降级 wide | ~1.3s + wide |
+| 都不行 → Lua 立即再次 local | 下一轮 local |
 
-**为什么不 top_k=1**：错配后只能降级 wide（重新 collect 1.5s + 多 seed）≈ 5s；本地 seed 2 直接接上只 ~2.1s。
+**为什么不 top_k=1**：错配后只能等下一轮 local 重新 collect；本轮 seed 2 直接接上只 ~2.1s。
 **为什么不 top_k=3**：对称错配最多 2 个候选位置（己方/对方），第 3 候选意义低。
 
 ### 2. prior 拆两个角色
@@ -52,7 +53,7 @@ SC yaw 量化误差 = 360° / num_sectors = 6°。`yaw_window_deg: 6` + `coarse_
 ```
 MODE_LOCAL (server)
   │
-  ├─ map / SC unavailable ──▶ "SC unavailable" → success=false (Lua 降 wide)
+  ├─ map / SC unavailable ──▶ "SC unavailable" → success=false (Lua 重试 local)
   │
   ├─ collect cloud (用 request.collect_duration_sec, default 0.5s)
   ├─ translate_to_robot_frame (odom_to_base_before)
@@ -244,29 +245,40 @@ local:
 > **`max_distance_from_prior_m` 不同场地必看 §"快速调参指南"**：默认 6.0 是 RMUC 几何下的取值，
 > RMUL（11×7m 半场）镜像最近 ~5m，需要降到 3.5；其它场地按半场最近镜像距离 × 0.6 计算。
 
-### `src/lua/action.lua` —— 新增 `try_relocalize_local_then_wide`
+### `src/lua/action.lua` —— `relocalize_local` 内部持续重试
 
 当前 `action:relocalize(mode, x, y, yaw)` / `action:relocalize_wide(x, y, yaw)` 已是终态签名（无 per-call collect/timeout 覆盖；timeout 由 cxx `Localization::Config::request_timeout_sec` 控）。
 
 ```lua
---- LOCAL 失败（SC 不可用 / 无匹配 / 错配被拦 / GICP 不收敛）时降级 WIDE。
---- blackboard.user.x/y/yaw 任一 NaN（LIO 死）则跳过 local 直接 wide+原点。
-function action:try_relocalize_local_then_wide()
-    local user = blackboard.user
-    if util.check_nan(user.x, user.y, user.yaw) then
-        self:warn("LIO/TF lost (NaN), skip local, wide+origin")
-        return self:relocalize_wide(0.0, 0.0, 0.0)
+local function pose_unavailable(x, y, yaw)
+    return x == nil or y == nil or yaw == nil or util.check_nan(x, y, yaw)
+end
+
+--- LOCAL 模式（SC-driven）：持续重试直到成功。
+--- blackboard.user.{x,y,yaw} 仅作 validator 锚点（拦镜像错配）；
+--- LIO/TF 丢失（nil/NaN）时直接返回失败，不重试也不切 WIDE。
+function action:relocalize_local()
+    local attempt = 1
+    while true do
+        local user = blackboard.user
+        if pose_unavailable(user.x, user.y, user.yaw) then
+            self:warn("reloc skip local (LIO/TF lost, no validator anchor)")
+            return false, nil
+        end
+
+        local ok, st = send_and_await(
+            self, "local_", api.relocalize_local, user.x, user.y, user.yaw)
+        if ok then return true, st end
+        self:warn(string.format("local failed, retrying (attempt %d)", attempt))
+        attempt = attempt + 1
+        request:yield()
     end
-    local ok = self:relocalize("local_", user.x, user.y, user.yaw)
-    if ok then return true end
-    self:warn("local failed, fallback wide with user prior")
-    return self:relocalize_wide(user.x, user.y, user.yaw)
 end
 ```
 
-> **设计选择**：当前方案 server 端只跑 SC（unavailable / no-match / 全 seed 拒收 → success=false），
-> Lua 端做 `local → wide` 级联。如果上层希望 local 失败即停车（不自动降 wide），把这个 helper 改名为
-> `try_relocalize_local`，去掉 fallback 即可。
+> **设计选择**：当前方案 server 端只跑 SC local（unavailable / no-match / 全 seed 拒收 → success=false），
+> Lua 端对 local 做立即重试。Wide 不再由 local 自动触发；需要停车大兜底时由上层显式调用
+> `action:relocalize_wide()`。Wide server 内部的 SC 失败后 yaw-search fallback 保持不变。
 
 ## 时间预算
 
@@ -288,12 +300,12 @@ end
 |---|---|---|
 | 1 | SC 可用 + 静止己方半场 | seed[0] sc_score 低，GICP 收敛，validator 通过 → success="ok (seed 0)" |
 | 2 | SC 可用 + 1.5m/s 运动 | seed[0] 命中，score 略高仍 <0.40 → success |
-| 3 | SC 不可用（descriptor_path=""） | "SC unavailable" → Lua try_relocalize_local_then_wide 切 wide |
-| 4 | SC 匹配为空（query 描述子全零） | "SC no match" → 同上 |
+| 3 | SC 不可用（descriptor_path=""） | "SC unavailable" → Lua 立即再次 local |
+| 4 | SC 匹配为空（query 描述子全零） | "SC no match" → Lua 立即再次 local |
 | 5 | SC top-1 错配到对方半场 | seed[0] GICP 收敛但 estimated 离 user_prior >15m → validator 距离拒 → seed[1] 重试 |
-| 6 | 两个 seed 都不过 | "local: all SC seeds failed" → Lua 降 wide |
-| 7 | LIO 死（blackboard.user.x = NaN） | Lua 跳过 local 直接 wide+原点 |
-| 8 | 旧 wide 路径不受影响 | wide handler 与 SC-local 无共用代码改动 |
+| 6 | 两个 seed 都不过 | "local: all SC seeds failed" → Lua 立即再次 local |
+| 7 | LIO 死（blackboard.user.x/y/yaw 为 nil 或 NaN） | Lua 跳过 local，不重试也不切 wide |
+| 8 | wide 独立入口不受影响 | wide handler 与 SC-local 无共用代码改动，内部 fallback 保留 |
 
 ## 改动文件汇总
 
@@ -303,7 +315,7 @@ end
 | `src/tools/registration_tools.hpp::LocalRegistrationConfig` | 加 `sc_top_k` | +1 |
 | `src/tools/param_tools.cpp::load_local_registration_config` | 读取 `local.sc_top_k` | +2 |
 | `config/location.yaml::local.*` | 调参 | ±15 |
-| `src/lua/action.lua::try_relocalize_local_then_wide` | 新增级联 helper | +12 |
+| `src/lua/action.lua::relocalize_local` | 改为 local 内部持续重试 | +15 |
 
 总改动 ~120 行。**不新增类型，不新增 tools 函数，不动 validator/wide handler**。
 
@@ -380,7 +392,7 @@ wide .max_distance_from_prior_m ≈ field_xy_size 对角线 × 0.7   (wide 给 p
 | RMUC | 6.0 (=7×0.85) | 12.0 |
 | RMUL | 3.5 (=5×0.7) | 9.0 |
 
-**这个数错了的现象**：local 一直 fallback 到 wide / wide 接受了对方半场的镜像位姿。
+**这个数错了的现象**：local 一直重试不过 / wide 接受了对方半场的镜像位姿。
 
 ### 第 4 步：运动适配（`collect_duration_sec` + score 阈值）
 

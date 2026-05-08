@@ -1,8 +1,32 @@
 rmcs_relocation:
   ros__parameters:
+    # -------------------------------------------------------------------------
+    # RMUC relocation 调参记录 / 估算版配置
+    # -------------------------------------------------------------------------
+    # 当前 RMUC 参数主要来自 docs/real-place-quick-params.md 的 30m x 16m 场地估算，
+    # 不是像 location.yaml 那样经过本地多轮实测定版。这里先把 RMCS 本轮实测经验写进注释，
+    # 参数值暂时保持现状，等 RMUC 实车/实地日志回来后再按日志收紧。
+    #
+    # 来源分工：
+    #   1. RMCS 实测迁移经验：GICP coarse failed 的处理顺序、wide/local 的日志判断、
+    #      SC seed 早停、fallback yaw 围绕当前 odom yaw 展开、map consistency retained_fraction 判断。
+    #   2. RMUC 场地估算：field_bounds=[-4,26]x[-8,8]、SC radius=15m、grid_step≈2m、
+    #      镜像轴 X=11、跨中线时 distance prior 不可靠。
+    #
+    # 调参总原则：
+    #   - 看到 "GICP coarse failed"：先放宽 max_correspondence_distance_m / 增加 coarse_iterations /
+    #     增大 submap_radius_m；不要先动 validator 阈值。
+    #   - 看到 "registration rejected: score,inlier"：GICP 已经收敛，但验收质量不足；
+    #     先确认是否镜像/假匹配，再决定放宽 score 或 inlier。
+    #   - 看到 "out_of_bounds / yaw / distance"：通常是错误 seed 或镜像，不要盲目放宽。
+    #   - local/wide 的 SC seed 是描述子网格中心，不是最终估计位姿；以 accepted 日志里的 estimated 为准。
+    #   - RMCS location.yaml 的 score/inlier 范围不能直接套到 RMUC，大场地结构、地图密度、动态物不同。
+
+    # map / frame / service ---------------------------------------------------
+    # RMUC 当前沿用 maps/1.pcd 与 maps/1.sc_desc；切换实地地图时两者必须成对更新。
+    # descriptor_path 对应的 .sc_desc 生成参数必须和 scan_context.* 一致。
     map_path: "/workspaces/RMCS/rmcs_ws/src/rmcs-navigation-deps/rmcs_relocation/maps/1.pcd"
     # map_path: "/tmp/point-lio/1.pcd"
-    # 全局 SC 描述子库路径
     descriptor_path: "/workspaces/RMCS/rmcs_ws/src/rmcs-navigation-deps/rmcs_relocation/maps/1.sc_desc"
     world_frame: "world"
     odom_frame: "odom"
@@ -10,24 +34,50 @@ rmcs_relocation:
     service_name: "/rmcs_relocation/relocalize"
     publish_tf_rate_hz: 10.0
 
-    # scan_context.* — 全局 SC 描述子库
+    # scan_context.* ----------------------------------------------------------
+    # RMUC 估算：30m x 16m 场地，max_radius=15m 覆盖半场+远墙特征。
+    # num_sectors=60 表示 yaw 量化约 6deg；SC 主路径一般用 6deg 步长补偿。
+    # 如果改 num_rings / num_sectors / max_radius_m，必须重生成 .sc_desc 并重启 server。
+    # docs 估算的离线库参数：rings=20, sectors=60, radius=15m, grid_step≈2m。
     scan_context:
         num_rings: 20
         num_sectors: 60
         max_radius_m: 15.0
 
-    # diagnostics.* — 调试日志开关（默认关）
+    # diagnostics.* -----------------------------------------------------------
+    # RMUC 尚未实测定版，建议保持 true。重点看：
+    #   - seed setup: query_filtered / map_filtered / yaw / step / max_corr
+    #   - map consistency: retained fraction 是否频繁 fallback
+    #   - GICP coarse/refine/precise 的 tried/converged/score/inlier
     diagnostics:
         log_failure_details: true
 
-    # initial.* — 初始重定位 (MODE_INITIAL=0)
+    # -------------------------------------------------------------------------
+    # initial.* — MODE_INITIAL=0
+    # -------------------------------------------------------------------------
+    # 用途：启动后第一次建立 world->odom。RMUC 文档假设 LIO / world / 导航 / SC 库共用原点，
+    # 哨兵也从 (0,0) 附近启动，因此 initial_guess 很准，不需要全局搜索。
+    #
+    # 当前参数状态：沿用 RMUC 初版估算，尚未按 RMCS location.yaml 的 initial 定版值放宽。
+    # RMCS 实测经验：如果 initial 偶发 "GICP coarse failed"，优先把 submap_radius 从 4.0 加到 5.0，
+    # max_correspondence_distance 从 1.8 加到 3.0，coarse_iterations 从 12 加到 20；
+    # 这些改动解决的是收敛，不是放宽最终验收。
     initial:
-        # [1-1] 点云采集
+        # [initial-1] 点云采集
+        # initial 只跑一次，可以采久一点换稳定性。当前 2.0s 是安全初值。
         pointcloud_topic: "/cloud_registered_undistort"
         collect_duration_sec: 2.0
         min_accumulated_points: 2000
 
-        # [1-2] 配准质量
+        # [initial-2] 点云预处理
+        # voxel=0.2 沿用 RMCS 经验；outlier_stddev=0.8 比默认略严，先压掉少量动态点。
+        voxel_leaf_m: 0.2
+        outlier_mean_k: 30
+        outlier_stddev_mul_thresh: 0.8
+
+        # [initial-3] 子图与 GICP 收敛裕量
+        # 当前是 RMUC 估算旧值：submap=4.0, max_corr=1.8。
+        # 如果实地日志出现 coarse failed，优先参考 location.yaml 放宽到 submap=5.0/max_corr=3.0。
         submap_radius_m: 4.0
         coarse_iterations: 12
         refine_iterations: 8
@@ -35,18 +85,16 @@ rmcs_relocation:
         max_correspondence_distance_m: 1.8
         score_threshold: 0.5
 
-        # [1-3] yaw 搜索窗口
+        # [initial-4] yaw 搜索
+        # 初始 yaw 预计很准，±30deg 足够兜住启动时小角度偏差。
+        # step=10 会生成 0,+10,-10,+20,-20,+30,-30 共 7 个 coarse 候选。
         yaw_search_window_deg: 30.0
         coarse_yaw_step_deg: 10.0
         refine_yaw_step_deg: 10.0
         coarse_top_k: 1
 
-        # [1-4] 点云预处理
-        voxel_leaf_m: 0.2
-        outlier_mean_k: 30
-        outlier_stddev_mul_thresh: 0.8
-
-        # [1-5] 验收阈值
+        # [initial-5] 最终验收
+        # initial 位置应在原点附近，translation/yaw 验收保持严格；field_bounds 使用 RMUC 30m x 16m 场地。
         initial_max_translation_error_m: 0.5
         initial_max_yaw_error_deg: 30.0
         field_bounds:
@@ -57,15 +105,27 @@ rmcs_relocation:
           min_z: -1.0
           max_z: 2.0
 
-
-    # local.* — 局部纠正 (MODE_LOCAL=1)，SC top-K 选种子 + 早停
+    # -------------------------------------------------------------------------
+    # local.* — MODE_LOCAL=1
+    # -------------------------------------------------------------------------
+    # 用途：运行中局部纠正。RMUC 大场地存在跨中线/镜像问题，local 不能只照搬 RMCS 小场地 top1 逻辑。
+    #
+    # 当前参数状态：主要来自 docs/real-place-quick-params.md 估算。
+    #   - grid_step≈2m → SC seed 位置误差最大约 sqrt(2)m，所以 submap/max_corr/map_consistency 比 prior-only 要宽。
+    #   - 镜像轴 X=11；哨兵跨中线附近时 distance_from_prior 拦不住镜像，需要 score/inlier/SC top-K 兜底。
+    #   - RMCS 实测 local 最终倾向 max_corr=4.0、yaw_window=12、coarse_iter=15、sc_top_k=1；
+    #     RMUC 这里暂时保守保留 top2 和 map consistency，等实地日志确认。
     local:
-        # [2-1] 点云采集（运动中减漂移：1.5m/s × 0.5s = 0.75m）
+        # [local-1] 点云采集
+        # 运动中采集窗口越长越容易有运动畸变；0.4s 对 1.5m/s 约 0.6m 漂移。
         pointcloud_topic: "/cloud_registered_undistort"
         collect_duration_sec: 0.4
         min_accumulated_points: 1000
 
-        # [2-2] 配准质量（SC 给好 yaw 后无需深迭代）
+        # [local-2] 子图与 GICP
+        # submap=5.0 用于覆盖 SC 网格 seed 误差和局部 LIO 漂移。
+        # max_corr=3.0 是 RMUC 估算值；如果日志连续 coarse failed，优先加到 4.0，
+        # 再把 coarse_iterations 加到 15，而不是先放宽 validator。
         submap_radius_m: 5.0
         coarse_iterations: 8
         refine_iterations: 4
@@ -73,20 +133,29 @@ rmcs_relocation:
         max_correspondence_distance_m: 3.0
         coarse_score_threshold: 0.5
 
-        # [2-3] yaw 搜索窗口（= 360/num_sectors=6° 量化误差，3 候选 0/+6/-6）
+        # [local-3] yaw 搜索
+        # sectors=60 → SC yaw 量化约 6deg。当前 local 只补偿 ±6deg，速度快但收敛域窄。
+        # 如果大角度扰动后 local 偶发失败，可参考 RMCS 定版改为 yaw_window=12.0。
         yaw_window_deg: 6.0
         coarse_yaw_step_deg: 6.0
         refine_yaw_step_deg: 6.0
 
-        # [2-4] map consistency filter（默认关）
+        # [local-4] map consistency filter
+        # RMUC 估算打开 filter：SC seed 误差约 1.4m，distance=2.0 留出地图稀疏/LIO 误差余量。
+        # 看日志 retained_fraction：正常应明显高于 0.15；频繁 fallback=true 说明 seed 偏或 distance 太小。
+        # RMCS 小场地实测 local 关闭 filter 更稳，但 RMUC 大场地动态/镜像风险更高，先保留开启。
         enable_map_consistency_filter: true
         map_consistency_distance_m: 2.0
         min_retained_fraction: 0.15
 
-        # [2-5] SC 候选数（镜像对称兜底；早停，平时只跑 1 次）
+        # [local-5] SC seed 数
+        # RMUC 保留 top2 作为镜像/相似结构兜底。注意 top_k 增大会拖慢；若 top1 很稳定，可降到 1。
         sc_top_k: 2
 
-        # [2-6] 验收阈值（max_distance_from_prior_m 关键：拦跨半场。RMUC 镜像最近 ~7m）
+        # [local-6] 验收
+        # distance 阈值用于拦远距离镜像，但跨中线附近镜像距离会变小，不能完全依赖 distance。
+        # 当前 score/inlier 仍偏保守；实地若误接镜像，先收 score_threshold 到 0.40~0.35 或 inlier 到 0.15。
+        # 若正确结果被拒，再考虑把 max_yaw_from_prior_deg 放到 90/120，而不是先放宽 field_bounds。
         score_threshold: 0.50
         min_inlier_ratio: 0.10
         max_distance_from_prior_m: 7.0
@@ -99,15 +168,30 @@ rmcs_relocation:
           min_z: -1.0
           max_z: 2.0
 
-
-    # wide.* — 全局兜底 (MODE_WIDE=2)
+    # -------------------------------------------------------------------------
+    # wide.* — MODE_WIDE=2
+    # -------------------------------------------------------------------------
+    # 用途：兜底重定位。调用 wide 前应停车；RMUC 当前优先成功率和正确性，速度其次。
+    #
+    # 当前参数状态：沿用 RMUC 大场地估算，比 RMCS location.yaml 更宽：
+    #   - submap=6.0 / max_corr=6.0 / yaw_window=180 是“先保证能收敛”的宽配置，可能较慢。
+    #   - runtime 的 SC 主路径会覆盖 yaw 搜索为 ±12deg / 6deg step；YAML yaw_window 主要影响 fallback。
+    #   - 代码已改为 fallback yaw 围绕当前 odom yaw 对称展开，因此 fallback_yaw_count 比固定世界 yaw 更可靠。
+    #
+    # 实地调参顺序：
+    #   - 如果 wide 太慢但 SC top0/top1 已稳定：优先把 sc_top_k 降到 3~4，或把 fallback yaw_window 收到 12。
+    #   - 如果 wide 误接低质量解：先把 min_inlier_ratio 提到 0.20~0.25，再把 score_threshold 收到 0.50。
+    #   - 如果 wide coarse failed：保留大 max_corr，先看 map_filtered/submap 点数是否足够。
     wide:
-        # [3-1] 点云采集
+        # [wide-1] 点云采集
+        # wide 停车调用，1.5s 换点数和稳定性；如果点数不足先加采集时间，不要先改 GICP。
         pointcloud_topic: "/cloud_registered_undistort"
         collect_duration_sec: 1.5
         min_accumulated_points: 2000
 
-        # [3-2] 配准质量
+        # [wide-2] 子图与 GICP
+        # 这是 RMUC 估算的宽收敛配置。与 RMCS 定版相比更慢但更保守。
+        # 实地稳定后可以逐步向 location.yaml 收敛：submap=5.0, refine=6, precise=15, max_corr=4.0。
         submap_radius_m: 6.0
         coarse_iterations: 15
         refine_iterations: 10
@@ -115,27 +199,41 @@ rmcs_relocation:
         max_correspondence_distance_m: 6.0
         coarse_score_threshold: 0.5
 
-        # [3-3] yaw 搜索窗口
+        # [wide-3] yaw 搜索
+        # 注意：SC 主路径在 runtime 中会强制使用 ±12deg / 6deg step。
+        # 这里的 180deg 主要给 fallback 用，属于成功率优先的旧估算；如果耗时不可接受，
+        # 优先改成 yaw_window=12.0 并依赖 fallback_yaw_count 离散枚举 yaw。
         yaw_window_deg: 180.0
         coarse_yaw_step_deg: 15.0
         refine_yaw_step_deg: 10.0
 
-        # [3-4] SC 主路径：从描述子库取前 sc_top_k 个候选作为 seed
+        # [wide-4] SC 主路径 seed
+        # RMUC 候选库比 RMCS 大，top5 保成功率但可能拖慢。RMCS 实测 top3 已够；
+        # RMUC 实地如果 SC[0~2] 总能命中，可把 sc_top_k 从 5 降到 3。
+        # max_candidate_count 是单个 seed 内保留的 GICP coarse 候选数，保持 1 以早停提速。
         sc_top_k: 5
         max_candidate_count: 1
         rank_weight_inlier: 0.5
         rank_weight_distance: 0.3
 
-        # [3-4b] fallback 路径（SC 不可用 / 无匹配时）：5 个位置 × yaw_count 个均匀朝向
+        # [wide-5] fallback seed
+        # 位置：center + 前后左右 3.5m，共 5 个位置。
+        # yaw：代码以当前 odom yaw 为中心对称展开；yaw_count=8 约等价于 45deg 间隔。
+        # 如果 fallback 仍 coarse failed，可先把 yaw_count 加到 12；如果太慢，先收 yaw_window 而不是删位置。
         fallback_position_radius_m: 3.5
         fallback_yaw_count: 8
 
-        # [3-5] map consistency filter（默认关）
+        # [wide-6] map consistency filter
+        # wide 停车采集，打开 filter 有助于减少动态物/临时物体影响。
+        # distance=2.0 来自 grid_step≈2m 的估算；retained_fraction 正常应远高于 0.15。
         enable_map_consistency_filter: true
         map_consistency_distance_m: 2.0
         min_retained_fraction: 0.15
 
-        # [3-6] 验收阈值
+        # [wide-7] 验收
+        # 当前阈值偏宽，适合“先跑通 RMUC 实地”的阶段，不是最终定版。
+        # RMCS 定版 wide 使用 score<=0.50 且 inlier>=0.25；RMUC 实地稳定后建议向这个方向收紧。
+        # max_yaw_from_prior=75 比 RMCS 的 120 更严，若大角度停车 wide 被 yaw 拒绝，再放宽到 120。
         score_threshold: 0.6
         min_inlier_ratio: 0.08
         max_distance_from_prior_m: 14.0
