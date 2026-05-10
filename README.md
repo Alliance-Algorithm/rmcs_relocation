@@ -46,9 +46,9 @@ sudo apt install -y \
 
 ```lua
 -- 阻塞等待结果，返回 (ok: bool, status: table | nil)
-action:relocalize_initial(0, 0, 0)
-action:relocalize_local() 
-action:relocalize_wide()
+action:relocalize_initial(0, 0, 0,20) --20为超时时间，超时返回false，下面同理
+action:relocalize_local(20) 
+action:relocalize_wide(20)
 
 
 -- 非阻塞状态查询
@@ -76,15 +76,8 @@ ros2 run tf2_ros tf2_echo world odom
 
 WIDE 默认走 fallback（5 位置 × 8 yaw）。要让 wide 用真正的全局识别，需要离线生成描述子库：
 
-### 1) 生成 `.sc_desc`
+### 1) 生成 `.sc_desc` --用离线工具生成
 
-```bash
-python3 src/rmcs-navigation-deps/rmcs_relocation/scripts/generate_map_descriptors.py \
-    --map /tmp/point-lio/1.pcd \
-    --output /tmp/point-lio/1.sc_desc \
-    --num-rings 20 --num-sectors 60 --max-radius 20.0 \
-    --grid-step 2.0 --min-points-per-grid 200
-```
 
 输出会打印 `map_hash = 0x...`，运行时 server 会对地图重算 hash 并校验匹配。
 
@@ -96,4 +89,9 @@ scan_context:
     num_rings: 20
     num_sectors: 60
     max_radius_m: 20.0    # 必须与 generator 完全一致，否则启动时 hash mismatch
+```
+### 3) 从 minpc 拉回 pcd 地图
+
+```bash
+scp remote:/tmp/point-lio/1.pcd src/rmcs-navigation-deps/rmcs_relocation/maps/1.pcd
 ```
