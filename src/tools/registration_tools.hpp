@@ -18,14 +18,12 @@ using PointCloud = pcl::PointCloud<Point>;
 
 struct InitialRegistrationConfig {
     int coarse_iterations = 12;
-    int refine_iterations = 8;
     int precise_iterations = 20;
 
     double max_correspondence_distance_m = 0.5;
     double score_threshold = 0.04;
     double yaw_search_window_deg = 15.0;
     double coarse_yaw_step_deg = 15.0;
-    double refine_yaw_step_deg = 15.0;
     std::size_t coarse_top_k = 1;
 
     double voxel_leaf_m = 0.2;
@@ -38,7 +36,6 @@ struct InitialRegistrationConfig {
  */
 struct LocalRegistrationConfig {
     int coarse_iterations = 12;
-    int refine_iterations = 6;
     int precise_iterations = 12;
 
     double max_correspondence_distance_m = 4.0;
@@ -46,7 +43,6 @@ struct LocalRegistrationConfig {
 
     double yaw_window_deg = 30.0;
     double coarse_yaw_step_deg = 15.0;
-    double refine_yaw_step_deg = 12.0;
 
     double submap_radius_m = 5.0;
 
@@ -63,7 +59,6 @@ struct LocalRegistrationConfig {
  */
 struct WideRegistrationConfig {
     int coarse_iterations = 15;
-    int refine_iterations = 10;
     int precise_iterations = 25;
 
     double max_correspondence_distance_m = 4.0;
@@ -71,7 +66,6 @@ struct WideRegistrationConfig {
 
     double yaw_window_deg = 60.0;
     double coarse_yaw_step_deg = 18.0;
-    double refine_yaw_step_deg = 12.0;
 
     double submap_radius_m = 6.0;
 

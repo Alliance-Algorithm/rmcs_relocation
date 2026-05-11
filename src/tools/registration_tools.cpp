@@ -2,7 +2,7 @@
  * @file registration_tools.cpp
  * @brief 点云配准工具实现
  *
- * 提供 INITIAL / LOCAL / WIDE 三个独立配准入口。共用 MultiStageGicp（coarse → refine → precise）
+ * 提供 INITIAL / LOCAL / WIDE 三个独立配准入口。共用 TwoStageGicp（coarse → precise）
  * 与 yaw 搜索 + top-k 候选 + 可选 map consistency filter。
  */
 
@@ -36,22 +36,13 @@ namespace {
 using GicpRegistrator = small_gicp::RegistrationPCL<Point, Point>;
 using PointCloudPtr = std::shared_ptr<PointCloud>;
 
-/// refine 窗口取 coarse / refine yaw step 的较大值，加大默认下限保证窗口非零
-auto refine_window(double coarse_step_deg, double refine_step_deg, double default_floor) -> double {
-    return std::max(
-        sanitize_step(coarse_step_deg, default_floor), sanitize_step(refine_step_deg, 15.0));
-}
-
-/// 多阶段 GICP 的统一参数包（INITIAL / LOCAL / WIDE 三处复用）
+/// 两阶段 GICP 的统一参数包（INITIAL / LOCAL / WIDE 三处复用）
 struct StageParams {
     int coarse_iterations = 12;
-    int refine_iterations = 8;
     int precise_iterations = 20;
 
     double yaw_window_deg = 15.0;
     double coarse_step_deg = 15.0;
-    double refine_step_deg = 15.0;
-    double refine_window_deg = 15.0;
 
     std::size_t coarse_top_k = 1;
     double coarse_score_threshold = std::numeric_limits<double>::infinity();
@@ -62,12 +53,9 @@ struct StageParams {
     static auto from_initial(const InitialRegistrationConfig& c) -> StageParams {
         return StageParams{
             .coarse_iterations = sanitize_iterations(c.coarse_iterations, 12),
-            .refine_iterations = sanitize_iterations(c.refine_iterations, 8),
             .precise_iterations = sanitize_iterations(c.precise_iterations, 20),
             .yaw_window_deg = sanitize_non_negative(c.yaw_search_window_deg, 0.0),
             .coarse_step_deg = sanitize_step(c.coarse_yaw_step_deg, 1.0),
-            .refine_step_deg = sanitize_step(c.refine_yaw_step_deg, 1.0),
-            .refine_window_deg = refine_window(c.coarse_yaw_step_deg, c.refine_yaw_step_deg, 15.0),
             .coarse_top_k = std::max<std::size_t>(1, c.coarse_top_k),
             .coarse_score_threshold = sanitize_non_negative(c.score_threshold, 0.04),
             .max_correspondence_distance =
@@ -78,12 +66,9 @@ struct StageParams {
     static auto from_local(const LocalRegistrationConfig& c) -> StageParams {
         return StageParams{
             .coarse_iterations = sanitize_iterations(c.coarse_iterations, 10),
-            .refine_iterations = sanitize_iterations(c.refine_iterations, 5),
             .precise_iterations = sanitize_iterations(c.precise_iterations, 15),
             .yaw_window_deg = sanitize_non_negative(c.yaw_window_deg, 0.0),
             .coarse_step_deg = sanitize_step(c.coarse_yaw_step_deg, 1.0),
-            .refine_step_deg = sanitize_step(c.refine_yaw_step_deg, 1.0),
-            .refine_window_deg = refine_window(c.coarse_yaw_step_deg, c.refine_yaw_step_deg, 15.0),
             .coarse_top_k = 1,
             .coarse_score_threshold = sanitize_non_negative(c.coarse_score_threshold, 0.3),
             .max_correspondence_distance =
@@ -95,12 +80,9 @@ struct StageParams {
     static auto from_wide(const WideRegistrationConfig& c) -> StageParams {
         return StageParams{
             .coarse_iterations = sanitize_iterations(c.coarse_iterations, 12),
-            .refine_iterations = sanitize_iterations(c.refine_iterations, 8),
             .precise_iterations = sanitize_iterations(c.precise_iterations, 20),
             .yaw_window_deg = sanitize_non_negative(c.yaw_window_deg, 0.0),
             .coarse_step_deg = sanitize_step(c.coarse_yaw_step_deg, 1.0),
-            .refine_step_deg = sanitize_step(c.refine_yaw_step_deg, 1.0),
-            .refine_window_deg = refine_window(c.coarse_yaw_step_deg, c.refine_yaw_step_deg, 22.5),
             .coarse_top_k = std::max<std::size_t>(1, c.max_candidate_count),
             .coarse_score_threshold = sanitize_non_negative(c.coarse_score_threshold, 0.15),
             .max_correspondence_distance =
@@ -196,7 +178,7 @@ class GicpAligner {
 public:
     GicpAligner(
         int iterations, double max_correspondence_distance_m, PointCloudPtr source,
-        PointCloudPtr target, double epsilon = 1e-6)
+        PointCloudPtr target, double epsilon = 1e-3)
         : max_correspondence_distance_m_(max_correspondence_distance_m) {
         registrator_.setRegistrationType("VGICP");
         registrator_.setVoxelResolution(0.2);
@@ -369,10 +351,9 @@ auto apply_map_consistency_filter(
     };
 }
 
-class MultiStageGicp {
+class TwoStageGicp {
     StageParams params_;
     GicpAligner coarse_;
-    GicpAligner refine_;
     GicpAligner precise_;
     std::size_t source_size_ = 0;
     std::size_t target_size_ = 0;
@@ -423,45 +404,6 @@ class MultiStageGicp {
         return coarse_results;
     }
 
-    [[nodiscard]] auto run_refine(const std::vector<ScoredTransform>& coarse_results)
-        -> std::optional<ScoredTransform> {
-        auto best_refine = std::optional<ScoredTransform>{};
-        auto tried_count = std::size_t{};
-        auto converged_count = std::size_t{};
-
-        for (const auto& coarse_result : coarse_results) {
-            const auto candidates = generate_yaw_candidates(
-                coarse_result.transform, params_.refine_window_deg, params_.refine_step_deg);
-            tried_count += candidates.size();
-            for (const auto& candidate_guess : candidates) {
-                if (auto candidate = refine_.try_align(candidate_guess); candidate.has_value()) {
-                    ++converged_count;
-                    if (!best_refine || candidate->score < best_refine->score)
-                        best_refine = candidate;
-                }
-            }
-        }
-
-        const auto prefix = log_prefix(label_);
-        if (!best_refine) {
-            // 调参诊断日志：记录 GICP refine 阶段失败，区分 coarse 成功但 refine 不收敛的情况。
-            RCLCPP_WARN(
-                relocation_logger(),
-                "%.*s GICP refine failed: tried=%zu converged=0 refine_window=%.1f step=%.1f "
-                "iter=%d max_corr=%.2f",
-                prefix.size, prefix.data, tried_count, params_.refine_window_deg,
-                params_.refine_step_deg, params_.refine_iterations,
-                params_.max_correspondence_distance);
-            return best_refine;
-        }
-
-        // 调参诊断日志：记录 refine 阶段收敛数量与最好 score。
-        RCLCPP_INFO(
-            relocation_logger(), "%.*s GICP refine ok: tried=%zu converged=%zu best_score=%.4f",
-            prefix.size, prefix.data, tried_count, converged_count, best_refine->score);
-        return best_refine;
-    }
-
     [[nodiscard]] auto run_precise(const Eigen::Isometry3f& guess)
         -> std::optional<PipelineResult> {
         const auto prefix = log_prefix(label_);
@@ -493,37 +435,59 @@ class MultiStageGicp {
     }
 
 public:
-    MultiStageGicp(
+    TwoStageGicp(
         const StageParams& params, PointCloudPtr source, PointCloudPtr target,
         std::string_view label)
         : params_(params)
         , coarse_(params_.coarse_iterations, params_.max_correspondence_distance, source, target)
-        , refine_(params_.refine_iterations, params_.max_correspondence_distance, source, target)
         , precise_(
-              params_.precise_iterations, params_.max_correspondence_distance, source, target, 1e-5)
+              params_.precise_iterations, params_.max_correspondence_distance, source, target, 1e-4)
         , source_size_(source ? source->size() : 0)
         , target_size_(target ? target->size() : 0)
         , label_(label) {}
 
-    [[nodiscard]] auto run(const Eigen::Isometry3f& guess, bool require_refine_convergence)
+    [[nodiscard]] auto run(const Eigen::Isometry3f& guess)
         -> std::optional<PipelineResult> {
         auto coarse_results = run_coarse(guess);
         if (!coarse_results)
             return std::nullopt;
 
-        auto refined_result = run_refine(coarse_results.value());
-        if (!refined_result) {
-            if (require_refine_convergence)
-                return std::nullopt;
-            refined_result = coarse_results->front();
+        auto best_precise = std::optional<PipelineResult>{};
+        auto tried_count = std::size_t{};
+        auto converged_count = std::size_t{};
+        for (const auto& coarse_result : coarse_results.value()) {
+            ++tried_count;
+            auto precise_result = run_precise(coarse_result.transform);
+            if (!precise_result)
+                continue;
+
+            ++converged_count;
+            if (!best_precise || precise_result->score < best_precise->score)
+                best_precise = precise_result;
         }
 
-        return run_precise(refined_result->transform);
+        const auto prefix = log_prefix(label_);
+        if (!best_precise) {
+            RCLCPP_WARN(
+                relocation_logger(), "%.*s GICP precise failed for all coarse candidates: "
+                                     "tried=%zu converged=0 iter=%d max_corr=%.2f",
+                prefix.size, prefix.data, tried_count, params_.precise_iterations,
+                params_.max_correspondence_distance);
+            return std::nullopt;
+        }
+
+        RCLCPP_INFO(
+            relocation_logger(),
+            "%.*s GICP two-stage ok: precise_tried=%zu precise_converged=%zu best_score=%.4f "
+            "best_inlier=%.3f",
+            prefix.size, prefix.data, tried_count, converged_count, best_precise->score,
+            best_precise->inlier_ratio);
+        return best_precise;
     }
 };
 
 /**
- * @brief 单 seed 配准：extract_submap → preprocess → optional consistency filter → MultiStageGicp
+ * @brief 单 seed 配准：extract_submap → preprocess → optional consistency filter → TwoStageGicp
  *        LOCAL 用 LocalRegistrationConfig 的 enable_map_consistency_filter /
  * map_consistency_distance_m, WIDE 用 WideRegistrationConfig 的对应字段；通过两个 bool/double
  * 参数显式传入解耦。
@@ -561,12 +525,12 @@ auto run_seed_pipeline(
     RCLCPP_INFO(
         relocation_logger(),
         "%.*s seed setup: query_filtered=%zu submap_raw=%zu map_filtered=%zu "
-        "submap_radius=%.2f max_corr=%.2f iter=%d/%d/%d yaw=%.1f step=%.1f/%.1f "
+        "submap_radius=%.2f max_corr=%.2f iter=%d/%d yaw=%.1f step=%.1f "
         "seed=(%.2f,%.2f,%.1fdeg)",
         prefix.size, prefix.data, filtered_query ? filtered_query->size() : 0, map_submap->size(),
         filtered_map->size(), stage.submap_radius_m, stage.max_correspondence_distance,
-        stage.coarse_iterations, stage.refine_iterations, stage.precise_iterations,
-        stage.yaw_window_deg, stage.coarse_step_deg, stage.refine_step_deg,
+        stage.coarse_iterations, stage.precise_iterations, stage.yaw_window_deg,
+        stage.coarse_step_deg,
         seed_world_to_base.translation().x(), seed_world_to_base.translation().y(),
         std::atan2(
             static_cast<double>(seed_world_to_base.rotation()(1, 0)),
@@ -601,8 +565,8 @@ auto run_seed_pipeline(
 
     const auto seed_world_to_odom =
         world_to_odom_from_world_to_base(seed_world_to_base, prior.odom_to_base);
-    auto pipeline = MultiStageGicp{stage, seed_filtered_query, filtered_map, label};
-    return pipeline.run(seed_world_to_odom, true);
+    auto pipeline = TwoStageGicp{stage, seed_filtered_query, filtered_map, label};
+    return pipeline.run(seed_world_to_odom);
 }
 
 } // namespace
@@ -669,9 +633,9 @@ auto run_initial(
     if (!filtered_query || !filtered_map || filtered_map->empty())
         return false;
 
-    auto pipeline = MultiStageGicp{
+    auto pipeline = TwoStageGicp{
         StageParams::from_initial(initial_config), filtered_query, filtered_map, "initial"};
-    auto pipeline_result = pipeline.run(world_to_odom_guess, false);
+    auto pipeline_result = pipeline.run(world_to_odom_guess);
     if (!pipeline_result)
         return false;
 

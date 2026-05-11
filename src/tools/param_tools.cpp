@@ -106,14 +106,12 @@ auto load_initial_runtime_config(ParamReader& reader) -> InitialRuntimeConfig {
 auto load_initial_registration_config(ParamReader& reader) -> InitialRegistrationConfig {
     auto config = InitialRegistrationConfig {};
     config.coarse_iterations = reader.read_int("initial.coarse_iterations", 12);
-    config.refine_iterations = reader.read_int("initial.refine_iterations", 8);
     config.precise_iterations = reader.read_int("initial.precise_iterations", 20);
     config.max_correspondence_distance_m =
         reader.read_double("initial.max_correspondence_distance_m", 0.5);
     config.score_threshold = reader.read_double("initial.score_threshold", 0.04);
     config.yaw_search_window_deg = reader.read_double("initial.yaw_search_window_deg", 15.0);
     config.coarse_yaw_step_deg = reader.read_double("initial.coarse_yaw_step_deg", 15.0);
-    config.refine_yaw_step_deg = reader.read_double("initial.refine_yaw_step_deg", 15.0);
     config.coarse_top_k =
         static_cast<std::size_t>(reader.read_positive_int("initial.coarse_top_k", 1));
     config.voxel_leaf_m = reader.read_double("initial.voxel_leaf_m", 0.2);
@@ -148,7 +146,6 @@ auto load_local_runtime_config(
 auto load_local_registration_config(ParamReader& reader) -> LocalRegistrationConfig {
     auto config = LocalRegistrationConfig {};
     config.coarse_iterations = reader.read_int("local.coarse_iterations", 12);
-    config.refine_iterations = reader.read_int("local.refine_iterations", 6);
     config.precise_iterations = reader.read_int("local.precise_iterations", 12);
 
     config.max_correspondence_distance_m =
@@ -157,7 +154,6 @@ auto load_local_registration_config(ParamReader& reader) -> LocalRegistrationCon
 
     config.yaw_window_deg = reader.read_double("local.yaw_window_deg", 30.0);
     config.coarse_yaw_step_deg = reader.read_double("local.coarse_yaw_step_deg", 15.0);
-    config.refine_yaw_step_deg = reader.read_double("local.refine_yaw_step_deg", 12.0);
 
     config.submap_radius_m = reader.read_double("local.submap_radius_m", 5.0);
 
@@ -195,7 +191,6 @@ auto load_wide_runtime_config(
 auto load_wide_registration_config(ParamReader& reader) -> WideRegistrationConfig {
     auto config = WideRegistrationConfig {};
     config.coarse_iterations = reader.read_int("wide.coarse_iterations", 15);
-    config.refine_iterations = reader.read_int("wide.refine_iterations", 10);
     config.precise_iterations = reader.read_int("wide.precise_iterations", 25);
 
     config.max_correspondence_distance_m =
@@ -204,7 +199,6 @@ auto load_wide_registration_config(ParamReader& reader) -> WideRegistrationConfi
 
     config.yaw_window_deg = reader.read_double("wide.yaw_window_deg", 60.0);
     config.coarse_yaw_step_deg = reader.read_double("wide.coarse_yaw_step_deg", 18.0);
-    config.refine_yaw_step_deg = reader.read_double("wide.refine_yaw_step_deg", 12.0);
 
     config.submap_radius_m = reader.read_double("wide.submap_radius_m", 6.0);
     config.sc_top_k =

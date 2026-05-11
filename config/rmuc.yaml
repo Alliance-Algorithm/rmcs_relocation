@@ -48,7 +48,7 @@ rmcs_relocation:
     # RMUC 尚未实测定版，建议保持 true。重点看：
     #   - seed setup: query_filtered / map_filtered / yaw / step / max_corr
     #   - map consistency: retained fraction 是否频繁 fallback
-    #   - GICP coarse/refine/precise 的 tried/converged/score/inlier
+    #   - GICP coarse/precise 的 tried/converged/score/inlier
     diagnostics:
         log_failure_details: true
 
@@ -80,7 +80,6 @@ rmcs_relocation:
         # 如果实地日志出现 coarse failed，优先参考 location.yaml 放宽到 submap=5.0/max_corr=3.0。
         submap_radius_m: 4.0
         coarse_iterations: 12
-        refine_iterations: 8
         precise_iterations: 30
         max_correspondence_distance_m: 1.8
         score_threshold: 0.5
@@ -90,7 +89,6 @@ rmcs_relocation:
         # step=10 会生成 0,+10,-10,+20,-20,+30,-30 共 7 个 coarse 候选。
         yaw_search_window_deg: 30.0
         coarse_yaw_step_deg: 10.0
-        refine_yaw_step_deg: 10.0
         coarse_top_k: 1
 
         # [initial-5] 最终验收
@@ -128,7 +126,6 @@ rmcs_relocation:
         # 再把 coarse_iterations 加到 15，而不是先放宽 validator。
         submap_radius_m: 5.0
         coarse_iterations: 8
-        refine_iterations: 4
         precise_iterations: 8
         max_correspondence_distance_m: 3.0
         coarse_score_threshold: 0.5
@@ -138,7 +135,6 @@ rmcs_relocation:
         # 如果大角度扰动后 local 偶发失败，可参考 RMCS 定版改为 yaw_window=12.0。
         yaw_window_deg: 6.0
         coarse_yaw_step_deg: 6.0
-        refine_yaw_step_deg: 6.0
 
         # [local-4] map consistency filter
         # RMUC 估算打开 filter：SC seed 误差约 1.4m，distance=2.0 留出地图稀疏/LIO 误差余量。
@@ -191,10 +187,9 @@ rmcs_relocation:
 
         # [wide-2] 子图与 GICP
         # 这是 RMUC 估算的宽收敛配置。与 RMCS 定版相比更慢但更保守。
-        # 实地稳定后可以逐步向 location.yaml 收敛：submap=5.0, refine=6, precise=15, max_corr=4.0。
+        # 实地稳定后可以逐步向 location.yaml 收敛：submap=5.0, precise=15, max_corr=4.0。
         submap_radius_m: 6.0
         coarse_iterations: 15
-        refine_iterations: 10
         precise_iterations: 25
         max_correspondence_distance_m: 6.0
         coarse_score_threshold: 0.5
@@ -205,7 +200,6 @@ rmcs_relocation:
         # 优先改成 yaw_window=12.0 并依赖 fallback_yaw_count 离散枚举 yaw。
         yaw_window_deg: 180.0
         coarse_yaw_step_deg: 15.0
-        refine_yaw_step_deg: 10.0
 
         # [wide-4] SC 主路径 seed
         # RMUC 候选库比 RMCS 大，top5 保成功率但可能拖慢。RMCS 实测 top3 已够；

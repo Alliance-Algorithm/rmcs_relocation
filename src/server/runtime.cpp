@@ -689,7 +689,6 @@ struct RelocalizationServer::Impl {
         auto config = wide_registration_config_;
         config.yaw_window_deg = 12.0;
         config.coarse_yaw_step_deg = 6.0;
-        config.refine_yaw_step_deg = 6.0;
         return config;
     }
 
@@ -847,12 +846,11 @@ struct RelocalizationServer::Impl {
             matches.size(), matches.front().sc_score);
         RCLCPP_INFO(
             node_.get_logger(),
-            "wide: SC cfg yaw=±%.1fdeg coarse/refine_step=%.1f/%.1fdeg "
-            "score_th=%.3f cand=%zu submap=%.1fm iter=%d/%d/%d max_corr=%.1fm",
+            "wide: SC cfg yaw=±%.1fdeg coarse_step=%.1fdeg "
+            "score_th=%.3f cand=%zu submap=%.1fm iter=%d/%d max_corr=%.1fm",
             ctx.sc_config.yaw_window_deg, ctx.sc_config.coarse_yaw_step_deg,
-            ctx.sc_config.refine_yaw_step_deg, ctx.sc_config.coarse_score_threshold,
-            ctx.sc_config.max_candidate_count, ctx.sc_config.submap_radius_m,
-            ctx.sc_config.coarse_iterations, ctx.sc_config.refine_iterations,
+            ctx.sc_config.coarse_score_threshold, ctx.sc_config.max_candidate_count,
+            ctx.sc_config.submap_radius_m, ctx.sc_config.coarse_iterations,
             ctx.sc_config.precise_iterations, ctx.sc_config.max_correspondence_distance_m);
         for (std::size_t i = 0; i < matches.size(); ++i) {
             const auto& match = matches[i];
@@ -873,11 +871,10 @@ struct RelocalizationServer::Impl {
             node_.get_logger(),
             "wide: fallback seeds=%zu around center=(%.2f,%.2f) "
             "(submap_radius=%.1fm yaw_window=±%.1fdeg coarse_step=%.1fdeg "
-            "iter=%d/%d/%d max_corr=%.1fm score_th=%.3f)",
+            "iter=%d/%d max_corr=%.1fm score_th=%.3f)",
             seed_count, center.x(), center.y(), ctx.fallback_config.submap_radius_m,
             ctx.fallback_config.yaw_window_deg, ctx.fallback_config.coarse_yaw_step_deg,
-            ctx.fallback_config.coarse_iterations, ctx.fallback_config.refine_iterations,
-            ctx.fallback_config.precise_iterations,
+            ctx.fallback_config.coarse_iterations, ctx.fallback_config.precise_iterations,
             ctx.fallback_config.max_correspondence_distance_m,
             ctx.fallback_config.coarse_score_threshold);
         RCLCPP_INFO(

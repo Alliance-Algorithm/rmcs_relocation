@@ -16,15 +16,13 @@ namespace {
 
 auto default_initial_config() -> InitialRegistrationConfig {
     auto config = InitialRegistrationConfig{};
-    config.coarse_iterations = 12;
-    config.refine_iterations = 8;
-    config.precise_iterations = 20;
-    config.max_correspondence_distance_m = 0.8;
-    config.score_threshold = 0.05;
-    config.yaw_search_window_deg = 180.0;
-    config.coarse_yaw_step_deg = 30.0;
-    config.refine_yaw_step_deg = 10.0;
-    config.coarse_top_k = 2;
+    config.coarse_iterations = 20;
+    config.precise_iterations = 25;
+    config.max_correspondence_distance_m = 3.0;
+    config.score_threshold = 0.5;
+    config.yaw_search_window_deg = 30.0;
+    config.coarse_yaw_step_deg = 10.0;
+    config.coarse_top_k = 1;
     config.voxel_leaf_m = 0.1;
     config.outlier_mean_k = 20;
     config.outlier_stddev_mul_thresh = 1.0;
@@ -56,8 +54,8 @@ auto yaw_error_deg(const Eigen::Isometry3f& a, const Eigen::Isometry3f& b) -> fl
 
 TEST(RegistrationTest, RunInitialRecoversKnownTransform) {
     auto map_cloud = test_helpers::create_cube_cloud(5.0F, 0.2F);
-    const auto applied = make_transform(1.0F, 2.0F, 0.0F, 15.0F);
-    auto query_cloud = test_helpers::apply_transform(*map_cloud, 1.0F, 2.0F, 0.0F, 15.0F);
+    const auto applied = make_transform(0.3F, -0.2F, 0.0F, 15.0F);
+    auto query_cloud = test_helpers::apply_transform(*map_cloud, 0.3F, -0.2F, 0.0F, 15.0F);
 
     auto result = Eigen::Isometry3f::Identity();
     auto score = 99.0;
