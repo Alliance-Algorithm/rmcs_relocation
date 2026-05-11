@@ -8,8 +8,8 @@ rmcs_relocation:
     #   - 注释里的 score/inlier 范围是本机本地图测试经验，实车上只作为参考。
 
     # map / frame / service ---------------------------------------------------
-    map_path: "/workspaces/RMCS/rmcs_ws/src/rmcs-navigation-deps/rmcs_relocation/maps/1.pcd"
-    descriptor_path: "/workspaces/RMCS/rmcs_ws/src/rmcs-navigation-deps/rmcs_relocation/maps/1.sc_desc"
+    map_path: "/rmcs_install/share/rmcs_relocation/maps/1.pcd"
+    descriptor_path: "/rmcs_install/share/rmcs_relocation/maps/1.sc_desc"
     world_frame: "world"
     odom_frame: "odom"
     base_frame: "base_link"

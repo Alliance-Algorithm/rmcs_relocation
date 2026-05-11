@@ -104,8 +104,8 @@ class PCDPublisher(Node):
         with open(filepath, "rb") as f:
             for line in f:
                 if line.startswith(b"DATA"):
+                    data_offset = f.tell()
                     break
-                data_offset = f.tell()
 
         with open(filepath, "rb") as f:
             f.seek(data_offset)
@@ -116,7 +116,7 @@ class PCDPublisher(Node):
             if points.ndim == 1:
                 points = points.reshape(1, -1)
         elif info["data_mode"] == "binary":
-            row_bytes = sum(info["sizes"])
+            row_bytes = sum(size * count for size, count in zip(info["sizes"], info["counts"]))
             dtype_map = {"F": "f", "U": "I", "I": "i"}
             fmt = "".join(dtype_map.get(t, "f") for t in info["types"])
             expected = n_points * row_bytes
