@@ -12,7 +12,6 @@ struct InitialRuntimeConfig {
     std::string pointcloud_topic = "/cloud_registered_undistort";
     double collect_duration_sec = 2.0;
     int min_accumulated_points = 2500;
-    double submap_radius_m = 4.0;
 };
 
 struct LocalRuntimeConfig {

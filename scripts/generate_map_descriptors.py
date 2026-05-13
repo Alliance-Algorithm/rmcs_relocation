@@ -1,19 +1,26 @@
 #!/usr/bin/env python3
 """
-generate_map_descriptors.py — 离线为全局 PCD 地图生成 ScanContext 描述子库 (.sc_desc v2)
+generate_map_descriptors.py — 离线为全局 PCD 地图生成 ScanContext 描述子库 (.sc_desc v3)
 
 输出格式（与 src/server/map_descriptor_db.cpp 严格同构）：
 
-  magic        char[4]   = "SCDS"
-  version      uint32_le = 2
-  num_desc     uint32_le
-  num_rings    uint32_le
-  num_sectors  uint32_le
-  max_radius   float32_le
-  map_hash     uint32_le  (FNV-1a 32-bit, 见 compute_map_hash 实现)
+  magic         char[4]   = "SCDS"
+  version       uint32_le = 3
+  num_desc      uint32_le
+  num_rings     uint32_le   (语义 ring 数，不含通道堆叠)
+  num_sectors   uint32_le
+  channel_count uint32_le   (= SC_CHANNEL_COUNT,目前固定 3)
+  max_radius    float32_le
+  z_min         float32_le
+  z_max         float32_le
+  map_hash      uint32_le  (FNV-1a 32-bit, 见 compute_map_hash 实现)
   for each desc:
-    world_xyz  float32_le * 3
-    desc_data  float32_le * (num_rings * num_sectors), row-major
+    world_xyz   float32_le * 3
+    desc_data   float32_le * (num_rings * channel_count * num_sectors), row-major
+                row 排布: [ch0_rings | ch1_rings | ch2_rings]
+                ch0 = max_z normalized (max-height per cell)
+                ch1 = log2(1+count) normalized (log-density)
+                ch2 = (max_z - min_z) normalized (z-range)
 
 哈希采样规则（与 C++ 同构）：
   n = min(10000, N)
@@ -27,6 +34,7 @@ generate_map_descriptors.py — 离线为全局 PCD 地图生成 ScanContext 描
       --map /tmp/point-lio/1.pcd \\
       --output /tmp/point-lio/1.sc_desc \\
       --num-rings 20 --num-sectors 60 --max-radius 20.0 \\
+      --z-min 0.15 --z-max 2.0 \\
       --grid-step 2.0
 """
 
@@ -44,6 +52,11 @@ import numpy as np
 FNV_OFFSET_BASIS = 0x811c9dc5
 FNV_PRIME = 0x01000193
 HASH_MAX_SAMPLES = 10000
+
+# 必须和 C++ 端的 SC_CHANNEL_COUNT 严格一致（src/tools/scan_context.hpp）
+SC_CHANNEL_COUNT = 3
+# log2(1 + 64) ≈ 6.022 — 通道 1 的归一化分母（count >= 64 时封顶到 1）
+DENSITY_LOG_DENOM = math.log2(1.0 + 64.0)
 
 
 def load_pcd(path: Path) -> np.ndarray:
@@ -122,21 +135,43 @@ def compute_map_hash(points: np.ndarray) -> int:
 
 
 def build_descriptor(
-    local_points: np.ndarray, num_rings: int, num_sectors: int, max_radius: float
+    local_points: np.ndarray,
+    num_rings: int,
+    num_sectors: int,
+    max_radius: float,
+    z_min: float,
+    z_max: float,
 ) -> np.ndarray:
-    """构造 (num_rings, num_sectors) 的 SC 描述子（max-height per cell, 与 C++ 同构）。"""
-    desc = np.zeros((num_rings, num_sectors), dtype=np.float32)
+    """构造 (num_rings * SC_CHANNEL_COUNT, num_sectors) 的多通道 SC 描述子（与 C++ build_descriptor 同构）。
+
+    通道布局沿 row 堆叠：
+        rows[0           : num_rings)         = ch0 max_z       归一化到 [0,1]
+        rows[num_rings   : 2*num_rings)       = ch1 log-density 归一化到 [0,1]
+        rows[2*num_rings : 3*num_rings)       = ch2 z-range     归一化到 [0,1]
+
+    z_min / z_max 既是高度过滤区间，也是 ch0 / ch2 的归一化分母。
+    """
+    desc = np.zeros((num_rings * SC_CHANNEL_COUNT, num_sectors), dtype=np.float32)
     if local_points.shape[0] == 0:
         return desc
 
+    z_span = max(1e-3, float(z_max) - float(z_min))
+
     xy = local_points[:, :2]
     ranges = np.hypot(xy[:, 0], xy[:, 1])
-    valid = (ranges < max_radius) & (ranges >= 1e-6)
+    zs = local_points[:, 2].astype(np.float32)
+    valid = (
+        (ranges < max_radius)
+        & (ranges >= 1e-6)
+        & (zs >= float(z_min))
+        & (zs <= float(z_max))
+    )
     if not np.any(valid):
         return desc
 
     pts = local_points[valid]
     ranges = ranges[valid]
+    zs = zs[valid]
     angles = np.arctan2(pts[:, 1], pts[:, 0])
     angles = np.where(angles < 0.0, angles + 2.0 * math.pi, angles)
 
@@ -148,11 +183,41 @@ def build_descriptor(
         num_sectors - 1, np.floor(angles / sector_step).astype(np.int32)
     )
 
-    heights = pts[:, 2].astype(np.float32)
-    # 等价于 cell-wise max
     flat = rings * num_sectors + sectors
-    desc_flat = desc.reshape(-1)
-    np.maximum.at(desc_flat, flat, heights)
+    cells = num_rings * num_sectors
+
+    # ch0: per-cell max_z
+    max_z = np.full(cells, -np.inf, dtype=np.float32)
+    np.maximum.at(max_z, flat, zs)
+    # ch2 还需要 min_z
+    min_z = np.full(cells, np.inf, dtype=np.float32)
+    np.minimum.at(min_z, flat, zs)
+    # ch1: per-cell count
+    count = np.zeros(cells, dtype=np.int64)
+    np.add.at(count, flat, 1)
+
+    occupied = count > 0
+
+    # 通道归一化
+    ch0 = np.zeros(cells, dtype=np.float32)
+    ch0[occupied] = np.clip(
+        (max_z[occupied] - float(z_min)) / z_span, 0.0, 1.0
+    ).astype(np.float32)
+
+    ch1 = np.zeros(cells, dtype=np.float32)
+    ch1[occupied] = np.clip(
+        np.log2(1.0 + count[occupied].astype(np.float32)) / float(DENSITY_LOG_DENOM),
+        0.0, 1.0,
+    ).astype(np.float32)
+
+    ch2 = np.zeros(cells, dtype=np.float32)
+    ch2[occupied] = np.clip(
+        (max_z[occupied] - min_z[occupied]) / z_span, 0.0, 1.0
+    ).astype(np.float32)
+
+    desc[0:num_rings, :] = ch0.reshape(num_rings, num_sectors)
+    desc[num_rings:2 * num_rings, :] = ch1.reshape(num_rings, num_sectors)
+    desc[2 * num_rings:3 * num_rings, :] = ch2.reshape(num_rings, num_sectors)
     return desc
 
 
@@ -185,19 +250,29 @@ def write_sc_desc(
     num_rings: int,
     num_sectors: int,
     max_radius: float,
+    z_min: float,
+    z_max: float,
     map_hash: int,
 ) -> None:
-    """descriptors: list of (world_xyz: (3,), desc: (num_rings, num_sectors))"""
+    """descriptors: list of (world_xyz: (3,), desc: (num_rings * SC_CHANNEL_COUNT, num_sectors))"""
+    expected_rows = num_rings * SC_CHANNEL_COUNT
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("wb") as f:
         f.write(b"SCDS")
-        f.write(struct.pack("<I", 2))  # version
+        f.write(struct.pack("<I", 3))  # version
         f.write(struct.pack("<I", len(descriptors)))
         f.write(struct.pack("<I", num_rings))
         f.write(struct.pack("<I", num_sectors))
+        f.write(struct.pack("<I", SC_CHANNEL_COUNT))
         f.write(struct.pack("<f", float(max_radius)))
+        f.write(struct.pack("<f", float(z_min)))
+        f.write(struct.pack("<f", float(z_max)))
         f.write(struct.pack("<I", map_hash & 0xFFFFFFFF))
         for world_xyz, desc in descriptors:
+            if desc.shape != (expected_rows, num_sectors):
+                raise RuntimeError(
+                    f"descriptor shape {desc.shape} != expected ({expected_rows}, {num_sectors})"
+                )
             f.write(struct.pack("<3f", float(world_xyz[0]), float(world_xyz[1]), float(world_xyz[2])))
             f.write(desc.astype(np.float32, copy=False).tobytes(order="C"))
 
@@ -209,12 +284,23 @@ def main() -> int:
     parser.add_argument("--num-rings", type=int, default=20)
     parser.add_argument("--num-sectors", type=int, default=60)
     parser.add_argument("--max-radius", type=float, default=20.0, help="ring max radius (m)")
+    parser.add_argument(
+        "--z-min", type=float, default=0.15,
+        help="filter out points with z below this (m); also normalization floor for ch0/ch2",
+    )
+    parser.add_argument(
+        "--z-max", type=float, default=2.0,
+        help="filter out points with z above this (m); also normalization ceiling for ch0/ch2",
+    )
     parser.add_argument("--grid-step", type=float, default=2.0, help="grid spacing in XY (m)")
     parser.add_argument(
         "--min-points-per-grid", type=int, default=200,
         help="skip grid cells with fewer points than this within max-radius",
     )
     args = parser.parse_args()
+
+    if args.z_max <= args.z_min:
+        raise SystemExit(f"--z-max ({args.z_max}) must be > --z-min ({args.z_min})")
 
     map_points = load_pcd(args.map)
     print(f"loaded {map_points.shape[0]} points from {args.map}")
@@ -238,7 +324,12 @@ def main() -> int:
         local = map_points[mask].copy()
         local[:, :3] -= center  # translate to grid-local frame
         desc = build_descriptor(
-            local, args.num_rings, args.num_sectors, args.max_radius,
+            local,
+            args.num_rings,
+            args.num_sectors,
+            args.max_radius,
+            args.z_min,
+            args.z_max,
         )
         descriptors.append((center.copy(), desc))
 
@@ -248,6 +339,8 @@ def main() -> int:
         num_rings=args.num_rings,
         num_sectors=args.num_sectors,
         max_radius=args.max_radius,
+        z_min=args.z_min,
+        z_max=args.z_max,
         map_hash=map_hash,
     )
     print(f"wrote {args.output}")

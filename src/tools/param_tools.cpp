@@ -99,7 +99,6 @@ auto load_initial_runtime_config(ParamReader& reader) -> InitialRuntimeConfig {
         reader.read_string("initial.pointcloud_topic", "/cloud_registered_undistort");
     config.collect_duration_sec = reader.read_double("initial.collect_duration_sec", 2.0);
     config.min_accumulated_points = reader.read_int("initial.min_accumulated_points", 2500);
-    config.submap_radius_m = reader.read_double("initial.submap_radius_m", 4.0);
     return config;
 }
 
@@ -155,8 +154,6 @@ auto load_local_registration_config(ParamReader& reader) -> LocalRegistrationCon
     config.yaw_window_deg = reader.read_double("local.yaw_window_deg", 30.0);
     config.coarse_yaw_step_deg = reader.read_double("local.coarse_yaw_step_deg", 15.0);
 
-    config.submap_radius_m = reader.read_double("local.submap_radius_m", 5.0);
-
     config.enable_map_consistency_filter =
         reader.read_bool("local.enable_map_consistency_filter", false);
     config.map_consistency_distance_m =
@@ -200,7 +197,6 @@ auto load_wide_registration_config(ParamReader& reader) -> WideRegistrationConfi
     config.yaw_window_deg = reader.read_double("wide.yaw_window_deg", 60.0);
     config.coarse_yaw_step_deg = reader.read_double("wide.coarse_yaw_step_deg", 18.0);
 
-    config.submap_radius_m = reader.read_double("wide.submap_radius_m", 6.0);
     config.sc_top_k =
         static_cast<std::size_t>(reader.read_positive_int("wide.sc_top_k", 5));
     config.fallback_position_radius_m =
@@ -237,6 +233,8 @@ auto load_scan_context_config(ParamReader& reader) -> ScanContextConfig {
     config.num_rings = reader.read_positive_int("scan_context.num_rings", 20);
     config.num_sectors = reader.read_positive_int("scan_context.num_sectors", 60);
     config.max_radius_m = reader.read_double("scan_context.max_radius_m", 20.0);
+    config.z_min_m = reader.read_double("scan_context.z_min_m", 0.15);
+    config.z_max_m = reader.read_double("scan_context.z_max_m", 2.0);
     return config;
 }
 

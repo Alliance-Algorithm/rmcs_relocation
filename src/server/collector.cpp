@@ -53,7 +53,7 @@ struct Collector::Impl {
     auto collect(
         rclcpp::Node& node, tf2_ros::Buffer& tf_buffer,
         const rclcpp::CallbackGroup::SharedPtr& callback_group, const std::string& topic_name,
-        double duration_sec) const -> std::shared_ptr<PointCloud> {
+        double duration_sec, int min_points) const -> std::shared_ptr<PointCloud> {
         auto accumulated = std::make_shared<PointCloud>();
         auto cloud_mutex = std::make_shared<std::mutex>();
 
@@ -85,9 +85,22 @@ struct Collector::Impl {
 
         const auto duration = std::max(0.1, duration_sec);
         const auto finish = std::chrono::steady_clock::now() + tools::as_steady_duration(duration);
+        const auto early_stop_threshold =
+            min_points > 0 ? static_cast<std::size_t>(min_points) : std::size_t{0};
 
-        while (rclcpp::ok() && std::chrono::steady_clock::now() < finish)
+        while (rclcpp::ok() && std::chrono::steady_clock::now() < finish) {
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            if (early_stop_threshold == 0)
+                continue;
+            // 短暂取锁读 size：回调写入 accumulated 也持同一把锁，可见性安全。
+            auto current_size = std::size_t{0};
+            {
+                auto lock = std::scoped_lock{*cloud_mutex};
+                current_size = accumulated->size();
+            }
+            if (current_size >= early_stop_threshold)
+                break;
+        }
 
         subscription.reset();
         return accumulated;
@@ -104,8 +117,8 @@ Collector::~Collector() = default;
 auto Collector::collect(
     rclcpp::Node& node, tf2_ros::Buffer& tf_buffer,
     const rclcpp::CallbackGroup::SharedPtr& callback_group, const std::string& topic_name,
-    double duration_sec) const -> std::shared_ptr<PointCloud> {
-    return pimpl_->collect(node, tf_buffer, callback_group, topic_name, duration_sec);
+    double duration_sec, int min_points) const -> std::shared_ptr<PointCloud> {
+    return pimpl_->collect(node, tf_buffer, callback_group, topic_name, duration_sec, min_points);
 }
 
 } // namespace rmcs::location

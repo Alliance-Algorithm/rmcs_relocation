@@ -13,8 +13,16 @@ namespace test_helpers = rmcs::location::test;
 
 namespace {
 
+/// 测试默认配置：z 区间放宽到 [-10, 10] 以避免单元测试受高度过滤影响。
+/// z 过滤本身有专门的用例覆盖。
 auto default_config() -> ScanContextConfig {
-    return ScanContextConfig{.num_rings = 20, .num_sectors = 60, .max_radius_m = 20.0};
+    return ScanContextConfig{
+        .num_rings = 20,
+        .num_sectors = 60,
+        .max_radius_m = 20.0,
+        .z_min_m = -10.0,
+        .z_max_m = 10.0,
+    };
 }
 
 /// 构造一个明显非对称的点云（避免立方体的 4 次旋转对称性导致 yaw 多解）
@@ -48,7 +56,8 @@ TEST(ScanContextTest, BuildDescriptorEmptyCloud) {
     const auto desc = build_descriptor(empty, config);
     EXPECT_EQ(desc.num_rings, config.num_rings);
     EXPECT_EQ(desc.num_sectors, config.num_sectors);
-    EXPECT_EQ(desc.data.rows(), config.num_rings);
+    EXPECT_EQ(desc.channel_count, SC_CHANNEL_COUNT);
+    EXPECT_EQ(desc.data.rows(), config.num_rings * SC_CHANNEL_COUNT);
     EXPECT_EQ(desc.data.cols(), config.num_sectors);
     EXPECT_FLOAT_EQ(desc.data.maxCoeff(), 0.0F);
 }
@@ -63,18 +72,58 @@ TEST(ScanContextTest, BuildDescriptorRadiusClipping) {
     cloud.push_back({5.0F, 0.0F, 2.0F});
 
     const auto desc = build_descriptor(cloud, config);
-    EXPECT_FLOAT_EQ(desc.data.maxCoeff(), 2.0F);
+    // 只有 1 个有效 cell，且 cell 内单点（z-range == 0），故 ch0/ch1 非零、ch2 = 0。
+    const auto rings = desc.num_rings;
+    EXPECT_GT(desc.data.topRows(rings).maxCoeff(), 0.0F);  // ch0
+    EXPECT_GT(desc.data.block(rings, 0, rings, desc.data.cols()).maxCoeff(), 0.0F);  // ch1
+    // 整体非零 cell 数与通道数一致（每个有效通道 1 个非零点）
+    auto nonzero_count = 0;
+    for (auto r = 0; r < desc.data.rows(); ++r)
+        for (auto c = 0; c < desc.data.cols(); ++c)
+            if (desc.data(r, c) > 0.0F)
+                ++nonzero_count;
+    EXPECT_EQ(nonzero_count, 2);
 }
 
 TEST(ScanContextTest, BuildDescriptorMaxHeightPerCell) {
-    const auto config = default_config();
+    const auto config = default_config();  // z_min=-10, z_max=10 → z_span=20
     PointCloud cloud;
     cloud.push_back({5.0F, 0.0F, 1.0F});
-    cloud.push_back({5.0F, 0.0F, 3.0F});
+    cloud.push_back({5.0F, 0.0F, 3.0F});  // 该 cell 内 max_z=3, min_z=1
     cloud.push_back({5.0F, 0.0F, 2.0F});
 
     const auto desc = build_descriptor(cloud, config);
-    EXPECT_FLOAT_EQ(desc.data.maxCoeff(), 3.0F);
+    // ch0 = (3 - (-10)) / 20 = 0.65
+    // ch2 = (3 - 1) / 20 = 0.10
+    // 通道 0 应该是 cell 内 max_z 的归一化版本，且严格大于通道 2
+    const auto rings = desc.num_rings;
+    auto ch0_max = desc.data.topRows(rings).maxCoeff();
+    auto ch2_max = desc.data.bottomRows(rings).maxCoeff();
+    EXPECT_NEAR(ch0_max, (3.0F + 10.0F) / 20.0F, 1e-5F);
+    EXPECT_NEAR(ch2_max, (3.0F - 1.0F) / 20.0F, 1e-5F);
+    EXPECT_GT(ch0_max, ch2_max);
+}
+
+TEST(ScanContextTest, BuildDescriptorZFilter) {
+    auto config = default_config();
+    config.z_min_m = 0.15;
+    config.z_max_m = 2.0;
+
+    PointCloud cloud;
+    cloud.push_back({5.0F, 0.0F, 0.05F});  // 低于 z_min，过滤
+    cloud.push_back({5.0F, 0.0F, 1.0F});   // 通过
+    cloud.push_back({5.0F, 0.0F, 5.0F});   // 高于 z_max，过滤
+
+    const auto desc = build_descriptor(cloud, config);
+    const auto rings = desc.num_rings;
+    // 只保留 z=1.0 的点，ch0 = (1.0 - 0.15) / 1.85
+    const auto expected_ch0 = (1.0F - 0.15F) / 1.85F;
+    EXPECT_NEAR(desc.data.topRows(rings).maxCoeff(), expected_ch0, 1e-5F);
+    // ch1 = log2(1+1)/log2(65) = 1/6.022 ≈ 0.166
+    const auto ch1_max = desc.data.block(rings, 0, rings, desc.data.cols()).maxCoeff();
+    EXPECT_NEAR(ch1_max, std::log2(2.0F) / std::log2(65.0F), 1e-5F);
+    // ch2 = 0（只有 1 个点，max_z == min_z）
+    EXPECT_FLOAT_EQ(desc.data.bottomRows(rings).maxCoeff(), 0.0F);
 }
 
 TEST(ScanContextTest, YawShiftRecoveryPositive90) {

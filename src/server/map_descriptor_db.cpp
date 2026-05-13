@@ -18,7 +18,7 @@ namespace rmcs::location {
 namespace {
 
 constexpr auto FILE_MAGIC = std::string_view{"SCDS"};
-constexpr std::uint32_t FILE_VERSION = 2;
+constexpr std::uint32_t FILE_VERSION = 3;
 
 template <typename T>
 auto read_le(std::ifstream& file, T& out) -> bool {
@@ -64,22 +64,33 @@ auto MapDescriptorDB::load(
     auto num_desc = std::uint32_t{0};
     auto num_rings = std::uint32_t{0};
     auto num_sectors = std::uint32_t{0};
+    auto channel_count = std::uint32_t{0};
     auto max_radius = float{0.0F};
+    auto z_min = float{0.0F};
+    auto z_max = float{0.0F};
     auto map_hash = std::uint32_t{0};
 
     if (!read_le(file, num_desc) || !read_le(file, num_rings) || !read_le(file, num_sectors)
-        || !read_le(file, max_radius) || !read_le(file, map_hash))
+        || !read_le(file, channel_count) || !read_le(file, max_radius) || !read_le(file, z_min)
+        || !read_le(file, z_max) || !read_le(file, map_hash))
         return false;
 
     const auto expected_rings = static_cast<std::uint32_t>(expected_config.num_rings);
     const auto expected_sectors = static_cast<std::uint32_t>(expected_config.num_sectors);
+    const auto expected_channels = static_cast<std::uint32_t>(SC_CHANNEL_COUNT);
     const auto expected_radius = static_cast<float>(expected_config.max_radius_m);
+    const auto expected_z_min = static_cast<float>(expected_config.z_min_m);
+    const auto expected_z_max = static_cast<float>(expected_config.z_max_m);
 
     if (num_rings != expected_rings || num_sectors != expected_sectors
-        || std::abs(max_radius - expected_radius) > 1e-3F || map_hash != expected_map_hash)
+        || channel_count != expected_channels
+        || std::abs(max_radius - expected_radius) > 1e-3F
+        || std::abs(z_min - expected_z_min) > 1e-3F || std::abs(z_max - expected_z_max) > 1e-3F
+        || map_hash != expected_map_hash)
         return false;
 
-    const auto cells = static_cast<std::size_t>(num_rings) * static_cast<std::size_t>(num_sectors);
+    const auto data_rows = static_cast<std::size_t>(num_rings) * channel_count;
+    const auto cells = data_rows * static_cast<std::size_t>(num_sectors);
     auto buffer = std::vector<float>(cells);
 
     entries_.reserve(num_desc);
@@ -93,16 +104,17 @@ auto MapDescriptorDB::load(
 
         entry.descriptor.num_rings = static_cast<int>(num_rings);
         entry.descriptor.num_sectors = static_cast<int>(num_sectors);
-        entry.descriptor.data.resize(num_rings, num_sectors);
+        entry.descriptor.channel_count = static_cast<int>(channel_count);
+        entry.descriptor.data.resize(static_cast<int>(data_rows), static_cast<int>(num_sectors));
 
         file.read(reinterpret_cast<char*>(buffer.data()), static_cast<std::streamsize>(cells * 4));
         if (!file)
             return false;
 
-        for (std::uint32_t r = 0; r < num_rings; ++r) {
+        for (std::size_t r = 0; r < data_rows; ++r) {
             for (std::uint32_t s = 0; s < num_sectors; ++s) {
                 entry.descriptor.data(static_cast<int>(r), static_cast<int>(s)) =
-                    buffer[static_cast<std::size_t>(r) * num_sectors + s];
+                    buffer[r * num_sectors + s];
             }
         }
 

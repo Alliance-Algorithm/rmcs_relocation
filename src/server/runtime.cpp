@@ -29,7 +29,6 @@
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <pcl/common/transforms.h>
 #include <pcl/io/pcd_io.h>
-#include <pcl/kdtree/kdtree_flann.h>
 #include <rclcpp/qos.hpp>
 #include <rmcs_relocation/srv/relocalize.hpp>
 #include <tf2/exceptions.h>
@@ -274,12 +273,27 @@ struct RelocalizationServer::Impl {
             return;
         }
 
-        map_kdtree_.setInputCloud(map_cloud_);
+        // 启动时一次性 voxel + outlier 全图；所有 GICP 路径（initial/local/wide）
+        // 共享这份 target，不再按 seed 切 submap。
+        map_voxelized_cloud_ =
+            tools::preprocess_map(map_cloud_, initial_registration_config_);
+        if (!map_voxelized_cloud_ || map_voxelized_cloud_->empty()) {
+            map_available_ = false;
+            RCLCPP_ERROR(
+                node_.get_logger(),
+                "map preprocess produced empty cloud (raw=%zu, voxel_leaf=%.3f); relocalization "
+                "will be unavailable",
+                map_cloud_->size(), initial_registration_config_.voxel_leaf_m);
+            return;
+        }
+
         map_available_ = true;
 
         RCLCPP_INFO(
-            node_.get_logger(), "map loaded: %s (%zu points)", map_path_.c_str(),
-            map_cloud_->size());
+            node_.get_logger(),
+            "map loaded: %s (raw=%zu, voxel_leaf=%.3f, after_preprocess=%zu)", map_path_.c_str(),
+            map_cloud_->size(), initial_registration_config_.voxel_leaf_m,
+            map_voxelized_cloud_->size());
 
         load_scan_context_db();
     }
@@ -348,12 +362,6 @@ struct RelocalizationServer::Impl {
         }
     }
 
-    // 从地图中提取子地图
-    auto extract_submap(const Eigen::Vector3f& center, double radius_m) const
-        -> std::shared_ptr<PointCloud> {
-        return tools::extract_submap_radius(map_kdtree_, map_cloud_, center, radius_m, 25.0);
-    }
-
     /**
      * @brief 点云收集结果的封装结构体
      */
@@ -379,8 +387,9 @@ struct RelocalizationServer::Impl {
                                     ? default_duration_sec
                                     : static_cast<double>(request.collect_duration_sec);
 
-        auto query_cloud =
-            collector_->collect(node_, tf_buffer_, pointcloud_group_, query_topic, duration_sec);
+        // min_points 同时作为 collector 早停阈值：达到即立刻返回，duration 仅做上界。
+        auto query_cloud = collector_->collect(
+            node_, tf_buffer_, pointcloud_group_, query_topic, duration_sec, min_points);
         if (!query_cloud
             || query_cloud->size() < static_cast<std::size_t>(std::max(1, min_points))) {
             return CollectResult{
@@ -458,20 +467,12 @@ struct RelocalizationServer::Impl {
             return;
         }
 
-        // 提取子地图
-        auto map_submap = extract_submap(
-            world_to_base_guess.translation(), initial_runtime_config_.submap_radius_m);
-        if (!map_submap || map_submap->empty()) {
-            response.message = "no map submap around initial guess";
-            return;
-        }
-
-        // 执行点云配准
+        // 执行点云配准（target = 启动时预处理的全图，不再切 submap）
         auto world_to_odom_result = Eigen::Isometry3f::Identity();
         double score = std::numeric_limits<double>::infinity();
         if (!tools::run_initial(
-                initial_registration_config_, query_result.cloud, map_submap, world_to_odom_guess,
-                world_to_odom_result, score)) {
+                initial_registration_config_, query_result.cloud, map_voxelized_cloud_,
+                world_to_odom_guess, world_to_odom_result, score)) {
             response.message = "initial registration failed";
             return;
         }
@@ -549,8 +550,8 @@ struct RelocalizationServer::Impl {
 
         auto registration_result = RegistrationResult{};
         if (!tools::run_local(
-                initial_registration_config_, local_registration_config_, query_cloud, map_cloud_,
-                map_kdtree_, seed_prior, registration_result)) {
+                initial_registration_config_, local_registration_config_, query_cloud,
+                map_voxelized_cloud_, seed_prior, registration_result)) {
             last_msg = "local seed[" + std::to_string(seed_index) + "] GICP not converged";
             return LocalSeedOutcome::Rejected;
         }
@@ -755,7 +756,7 @@ struct RelocalizationServer::Impl {
             (path == WidePath::Fallback) ? ctx.fallback_config : ctx.sc_config;
         const auto path_label = (path == WidePath::ScanContext) ? "scan_context" : "fallback";
         const auto runner = tools::WideSeedRunner{
-            initial_registration_config_, attempt_config, ctx.query_cloud, map_cloud_, map_kdtree_,
+            initial_registration_config_, attempt_config, ctx.query_cloud, map_voxelized_cloud_,
             ctx.registration_prior};
         if (!runner.valid()) {
             ctx.response.message = "wide query preprocess failed";
@@ -847,11 +848,11 @@ struct RelocalizationServer::Impl {
         RCLCPP_INFO(
             node_.get_logger(),
             "wide: SC cfg yaw=±%.1fdeg coarse_step=%.1fdeg "
-            "score_th=%.3f cand=%zu submap=%.1fm iter=%d/%d max_corr=%.1fm",
+            "score_th=%.3f cand=%zu iter=%d/%d max_corr=%.1fm",
             ctx.sc_config.yaw_window_deg, ctx.sc_config.coarse_yaw_step_deg,
             ctx.sc_config.coarse_score_threshold, ctx.sc_config.max_candidate_count,
-            ctx.sc_config.submap_radius_m, ctx.sc_config.coarse_iterations,
-            ctx.sc_config.precise_iterations, ctx.sc_config.max_correspondence_distance_m);
+            ctx.sc_config.coarse_iterations, ctx.sc_config.precise_iterations,
+            ctx.sc_config.max_correspondence_distance_m);
         for (std::size_t i = 0; i < matches.size(); ++i) {
             const auto& match = matches[i];
             RCLCPP_INFO(
@@ -870,11 +871,11 @@ struct RelocalizationServer::Impl {
         RCLCPP_INFO(
             node_.get_logger(),
             "wide: fallback seeds=%zu around center=(%.2f,%.2f) "
-            "(submap_radius=%.1fm yaw_window=±%.1fdeg coarse_step=%.1fdeg "
+            "(yaw_window=±%.1fdeg coarse_step=%.1fdeg "
             "iter=%d/%d max_corr=%.1fm score_th=%.3f)",
-            seed_count, center.x(), center.y(), ctx.fallback_config.submap_radius_m,
-            ctx.fallback_config.yaw_window_deg, ctx.fallback_config.coarse_yaw_step_deg,
-            ctx.fallback_config.coarse_iterations, ctx.fallback_config.precise_iterations,
+            seed_count, center.x(), center.y(), ctx.fallback_config.yaw_window_deg,
+            ctx.fallback_config.coarse_yaw_step_deg, ctx.fallback_config.coarse_iterations,
+            ctx.fallback_config.precise_iterations,
             ctx.fallback_config.max_correspondence_distance_m,
             ctx.fallback_config.coarse_score_threshold);
         RCLCPP_INFO(
@@ -1044,8 +1045,8 @@ struct RelocalizationServer::Impl {
     bool log_failure_details_ = false;
 
     bool map_available_ = false;
-    std::shared_ptr<PointCloud> map_cloud_;
-    pcl::KdTreeFLANN<Point> map_kdtree_;
+    std::shared_ptr<PointCloud> map_cloud_;                ///< 原始全图（仅用于 SC map_hash 校验）
+    std::shared_ptr<PointCloud> map_voxelized_cloud_;       ///< 启动时预处理后的 GICP target
 
     std::unique_ptr<Collector> collector_;
     std::unique_ptr<Validator> validator_;

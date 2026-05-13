@@ -53,16 +53,17 @@ auto yaw_error_deg(const Eigen::Isometry3f& a, const Eigen::Isometry3f& b) -> fl
 } // namespace
 
 TEST(RegistrationTest, RunInitialRecoversKnownTransform) {
-    auto map_cloud = test_helpers::create_cube_cloud(5.0F, 0.2F);
+    const auto config = default_initial_config();
+    auto raw_map = test_helpers::create_cube_cloud(5.0F, 0.2F);
+    auto map_target = preprocess_map(raw_map, config);
     const auto applied = make_transform(0.3F, -0.2F, 0.0F, 15.0F);
-    auto query_cloud = test_helpers::apply_transform(*map_cloud, 0.3F, -0.2F, 0.0F, 15.0F);
+    auto query_cloud = test_helpers::apply_transform(*raw_map, 0.3F, -0.2F, 0.0F, 15.0F);
 
     auto result = Eigen::Isometry3f::Identity();
     auto score = 99.0;
     const auto guess = Eigen::Isometry3f::Identity();
 
-    const auto ok = run_initial(
-        default_initial_config(), query_cloud, map_cloud, guess, result, score);
+    const auto ok = run_initial(config, query_cloud, map_target, guess, result, score);
 
     ASSERT_TRUE(ok);
     EXPECT_LT(score, 0.08);
@@ -73,36 +74,22 @@ TEST(RegistrationTest, RunInitialRecoversKnownTransform) {
 }
 
 TEST(RegistrationTest, YawRecoveryWithinWindow) {
-    auto map_cloud = test_helpers::create_cube_cloud(5.0F, 0.3F);
-    auto query_cloud = test_helpers::apply_transform(*map_cloud, 0.0F, 0.0F, 0.0F, 30.0F);
-
     auto config = default_initial_config();
     config.yaw_search_window_deg = 90.0;
     config.coarse_yaw_step_deg = 15.0;
 
+    auto raw_map = test_helpers::create_cube_cloud(5.0F, 0.3F);
+    auto map_target = preprocess_map(raw_map, config);
+    auto query_cloud = test_helpers::apply_transform(*raw_map, 0.0F, 0.0F, 0.0F, 30.0F);
+
     auto result = Eigen::Isometry3f::Identity();
     auto score = 99.0;
     const auto ok = run_initial(
-        config, query_cloud, map_cloud, Eigen::Isometry3f::Identity(), result, score);
+        config, query_cloud, map_target, Eigen::Isometry3f::Identity(), result, score);
     ASSERT_TRUE(ok);
 
     const auto expected = make_transform(0.0F, 0.0F, 0.0F, 30.0F).inverse();
     EXPECT_LT(yaw_error_deg(result, expected), 10.0F);
-}
-
-TEST(RegistrationTest, SubmapRadiusCorrect) {
-    auto map_cloud = test_helpers::create_cube_cloud(6.0F, 0.5F);
-    const auto center = Eigen::Vector3f{2.0F, -1.0F, 0.0F};
-    constexpr auto radius = 3.0;
-
-    auto submap = extract_submap_radius(map_cloud, center, radius, 5.0);
-    ASSERT_NE(submap, nullptr);
-    EXPECT_GT(submap->size(), 0u);
-
-    for (const auto& point : submap->points) {
-        const auto dist = (point.getVector3fMap() - center).norm();
-        EXPECT_LE(dist, radius + 0.1F);
-    }
 }
 
 TEST(RegistrationTest, VoxelDownsamplingReducesPoints) {
