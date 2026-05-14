@@ -99,6 +99,7 @@ install(PROGRAMS
   scripts/pcd_publisher.py
   scripts/tf_to_pose.py
   scripts/generate_map_descriptors.py
+  scripts/relocalize_trigger.py
   DESTINATION lib/${PROJECT_NAME}
 )
 install(DIRECTORY

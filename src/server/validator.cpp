@@ -58,8 +58,7 @@ auto evaluate_with_prior_thresholds(
     auto yaw_ok = true;
 
     if (prior.has_prior) {
-        distance_from_prior =
-            (estimated_translation - prior.world_to_base.translation()).norm();
+        distance_from_prior = (estimated_translation - prior.world_to_base.translation()).norm();
         yaw_error = std::abs(wrapped_angle_delta(
             yaw_from_rotation(world_to_base_estimated.rotation()),
             yaw_from_rotation(prior.world_to_base.rotation())));
@@ -72,17 +71,16 @@ auto evaluate_with_prior_thresholds(
 
     const auto score_term = confidence_lower_better(score, score_threshold);
     const auto inlier_term = confidence_higher_better(inlier_ratio, min_inlier_ratio);
-    const auto distance_term = prior.has_prior
-        ? confidence_lower_better(distance_from_prior, max_distance_from_prior_m)
-        : 1.0;
-    const auto yaw_term = prior.has_prior
-        ? confidence_lower_better(yaw_error, max_yaw_from_prior_rad)
-        : 1.0;
+    const auto distance_term =
+        prior.has_prior ? confidence_lower_better(distance_from_prior, max_distance_from_prior_m)
+                        : 1.0;
+    const auto yaw_term =
+        prior.has_prior ? confidence_lower_better(yaw_error, max_yaw_from_prior_rad) : 1.0;
 
     const auto confidence = std::clamp(
         0.4 * score_term + 0.3 * inlier_term + 0.2 * distance_term + 0.1 * yaw_term, 0.0, 1.0);
 
-    return ValidationResult {
+    return ValidationResult{
         .within_bounds = within_bounds,
         .score_ok = score_ok,
         .inlier_ok = inlier_ok,
@@ -112,8 +110,8 @@ struct Validator::Impl {
         double score, double inlier_ratio) const -> ValidationResult;
 
     auto evaluate_wide(
-        const RegistrationPrior& prior, const Eigen::Isometry3f& world_to_base_estimated,
-        double score, double inlier_ratio) const -> ValidationResult;
+        const Eigen::Isometry3f& world_to_base_estimated, double score, double inlier_ratio) const
+        -> ValidationResult;
 
     InitialValidationConfig initial_config_;
     LocalValidationConfig local_config_;
@@ -135,13 +133,12 @@ auto Validator::Impl::evaluate_initial(
 
     const auto score_ok = std::isfinite(score) && score <= initial_config_.score_threshold;
     const auto distance_ok = translation_error <= initial_config_.initial_max_translation_error_m;
-    const auto yaw_ok = yaw_error
-        <= static_cast<float>(
-            initial_config_.initial_max_yaw_error_deg * std::numbers::pi / 180.0);
+    const auto yaw_ok = yaw_error <= static_cast<float>(
+                            initial_config_.initial_max_yaw_error_deg * std::numbers::pi / 180.0);
 
     const auto accepted = within_bounds && score_ok && distance_ok && yaw_ok;
 
-    return ValidationResult {
+    return ValidationResult{
         .within_bounds = within_bounds,
         .score_ok = score_ok,
         .inlier_ok = true,
@@ -162,12 +159,12 @@ auto Validator::Impl::evaluate_local(
 }
 
 auto Validator::Impl::evaluate_wide(
-    const RegistrationPrior& prior, const Eigen::Isometry3f& world_to_base_estimated, double score,
-    double inlier_ratio) const -> ValidationResult {
+    const Eigen::Isometry3f& world_to_base_estimated, double score, double inlier_ratio) const
+    -> ValidationResult {
     return evaluate_with_prior_thresholds(
-        prior, world_to_base_estimated, score, inlier_ratio, wide_config_.field_bounds,
-        wide_config_.score_threshold, wide_config_.min_inlier_ratio,
-        wide_config_.max_distance_from_prior_m, wide_config_.max_yaw_from_prior_deg);
+        RegistrationPrior{}, world_to_base_estimated, score, inlier_ratio,
+        wide_config_.field_bounds, wide_config_.score_threshold, wide_config_.min_inlier_ratio, 1.0,
+        1.0);
 }
 
 Validator::Validator(
@@ -190,9 +187,9 @@ auto Validator::evaluate_local(
 }
 
 auto Validator::evaluate_wide(
-    const RegistrationPrior& prior, const Eigen::Isometry3f& world_to_base_estimated, double score,
-    double inlier_ratio) const -> ValidationResult {
-    return pimpl_->evaluate_wide(prior, world_to_base_estimated, score, inlier_ratio);
+    const Eigen::Isometry3f& world_to_base_estimated, double score, double inlier_ratio) const
+    -> ValidationResult {
+    return pimpl_->evaluate_wide(world_to_base_estimated, score, inlier_ratio);
 }
 
 } // namespace rmcs::location

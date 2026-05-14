@@ -9,9 +9,7 @@ using namespace rmcs::location;
 
 namespace {
 
-auto make_identity_pose() -> Eigen::Isometry3f {
-    return Eigen::Isometry3f::Identity();
-}
+auto make_identity_pose() -> Eigen::Isometry3f { return Eigen::Isometry3f::Identity(); }
 
 auto make_pose(float x, float y, float z, float yaw_deg) -> Eigen::Isometry3f {
     const auto yaw_rad = yaw_deg * std::numbers::pi_v<float> / 180.0F;
@@ -45,8 +43,6 @@ auto make_wide_config() -> WideValidationConfig {
     config.field_bounds = FieldBoundsConfig{-2.0, 7.0, -5.5, 5.5, -0.5, 1.0};
     config.score_threshold = 0.08;
     config.min_inlier_ratio = 0.15;
-    config.max_distance_from_prior_m = 10.0;
-    config.max_yaw_from_prior_deg = 120.0;
     return config;
 }
 
@@ -124,12 +120,8 @@ TEST(ValidatorTest, LocalAcceptedWhenAllPass) {
 TEST(ValidatorTest, WideRejectedWhenInlierTooLow) {
     auto validator = make_validator();
 
-    auto prior = RegistrationPrior{};
-    prior.has_prior = true;
-    prior.world_to_base = make_pose(2.0F, 3.0F, 0.0F, 0.0F);
-
     const auto estimated = make_pose(2.1F, 3.1F, 0.0F, 5.0F);
-    const auto result = validator.evaluate_wide(prior, estimated, 0.05, 0.10);
+    const auto result = validator.evaluate_wide(estimated, 0.05, 0.10);
     EXPECT_FALSE(result.accepted);
     EXPECT_FALSE(result.inlier_ok);
 }
@@ -149,7 +141,7 @@ TEST(ValidatorTest, ConfidenceInRange) {
     EXPECT_GE(local_result.confidence, 0.0F);
     EXPECT_LE(local_result.confidence, 1.0F);
 
-    const auto wide_result = validator.evaluate_wide(prior, make_identity_pose(), 0.01, 0.50);
+    const auto wide_result = validator.evaluate_wide(make_identity_pose(), 0.01, 0.50);
     EXPECT_GE(wide_result.confidence, 0.0F);
     EXPECT_LE(wide_result.confidence, 1.0F);
 }

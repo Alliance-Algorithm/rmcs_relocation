@@ -35,14 +35,14 @@ class MapDescriptorDB {
 public:
     struct Entry {
         Eigen::Vector3f world_position = Eigen::Vector3f::Zero();
-        ScanContextDescriptor descriptor {};
+        ScanContextDescriptor descriptor{};
     };
 
     /**
      * @brief 加载并校验 .sc_desc 文件
      *
      * 任一校验失败（文件不存在、magic/version 错、config 不匹配、map_hash 不匹配、IO 错）
-     * 都返回 false，db 内容被清空。调用方应在 false 时降级到 fallback 路径。
+     * 都返回 false，db 内容被清空。wide 调用方应直接失败并等待决策端重试。
      */
     [[nodiscard]] auto load(
         const std::filesystem::path& path, const ScanContextConfig& expected_config,
@@ -63,7 +63,7 @@ public:
 
 private:
     std::vector<Entry> entries_;
-    ScanContextConfig config_ {};
+    ScanContextConfig config_{};
     std::uint32_t map_hash_ = 0;
 };
 

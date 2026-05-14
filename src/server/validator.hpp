@@ -21,7 +21,7 @@ struct InitialValidationConfig {
     double initial_max_translation_error_m = 0.5;
     double initial_max_yaw_error_deg = 30.0;
 
-    FieldBoundsConfig field_bounds {
+    FieldBoundsConfig field_bounds{
         .minimum_x = -2.0,
         .maximum_x = 7.0,
         .minimum_y = -5.5,
@@ -32,7 +32,7 @@ struct InitialValidationConfig {
 };
 
 struct LocalValidationConfig {
-    FieldBoundsConfig field_bounds {
+    FieldBoundsConfig field_bounds{
         .minimum_x = -2.0,
         .maximum_x = 7.0,
         .minimum_y = -5.5,
@@ -48,7 +48,7 @@ struct LocalValidationConfig {
 };
 
 struct WideValidationConfig {
-    FieldBoundsConfig field_bounds {
+    FieldBoundsConfig field_bounds{
         .minimum_x = -2.0,
         .maximum_x = 7.0,
         .minimum_y = -5.5,
@@ -59,8 +59,6 @@ struct WideValidationConfig {
 
     double score_threshold = 0.08;
     double min_inlier_ratio = 0.15;
-    double max_distance_from_prior_m = 10.0;
-    double max_yaw_from_prior_deg = 120.0;
 };
 
 struct ValidationResult {
@@ -92,8 +90,8 @@ public:
         double score, double inlier_ratio) const -> ValidationResult;
 
     auto evaluate_wide(
-        const RegistrationPrior& prior, const Eigen::Isometry3f& world_to_base_estimated,
-        double score, double inlier_ratio) const -> ValidationResult;
+        const Eigen::Isometry3f& world_to_base_estimated, double score, double inlier_ratio) const
+        -> ValidationResult;
 
 private:
     RMCS_LOCATION_DECLARE_PIMPL(Validator)
