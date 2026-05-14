@@ -26,9 +26,9 @@ rmcs_relocation:
     # map / frame / service ---------------------------------------------------
     # RMUC 当前沿用 maps/1.pcd 与 maps/1.sc_desc；切换实地地图时两者必须成对更新。
     # descriptor_path 对应的 .sc_desc 生成参数必须和 scan_context.* 一致。
-    map_path: "/workspaces/RMCS/rmcs_ws/src/rmcs-navigation-deps/rmcs_relocation/maps/1.pcd"
+    map_path: "/rmcs_install/share/rmcs_relocation/maps/1.pcd"
     # map_path: "/tmp/point-lio/1.pcd"
-    descriptor_path: "/workspaces/RMCS/rmcs_ws/src/rmcs-navigation-deps/rmcs_relocation/maps/1.sc_desc"
+    descriptor_path: "/rmcs_install/share/rmcs_relocation/maps/1.sc_desc"
     world_frame: "world"
     odom_frame: "odom"
     base_frame: "base_link"

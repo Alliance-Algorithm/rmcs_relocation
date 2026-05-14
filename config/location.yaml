@@ -9,10 +9,10 @@ rmcs_relocation:
     #   - GICP target 是启动时一次性 voxel + outlier 处理的全图；不再按 seed 切 submap。
 
     # map / frame / service ---------------------------------------------------
-    #map_path: "/rmcs_install/share/rmcs_relocation/maps/my.pcd"
-    map_path: "/workspaces/RMCS/rmcs_ws/src/rmcs-navigation-deps/rmcs_relocation/maps/my.pcd"
-    #descriptor_path: "/rmcs_install/share/rmcs_relocation/maps/my.sc_desc"
-    descriptor_path: "/workspaces/RMCS/rmcs_ws/src/rmcs-navigation-deps/rmcs_relocation/maps/my.sc_desc"
+    map_path: "/rmcs_install/share/rmcs_relocation/maps/1.pcd"
+    # map_path: "/workspaces/RMCS/rmcs_ws/src/rmcs-navigation-deps/rmcs_relocation/maps/my.pcd"
+    descriptor_path: "/rmcs_install/share/rmcs_relocation/maps/1.sc_desc"
+    # descriptor_path: "/workspaces/RMCS/rmcs_ws/src/rmcs-navigation-deps/rmcs_relocation/maps/my.sc_desc"
     world_frame: "world"
     odom_frame: "odom"
     base_frame: "base_link"
