@@ -33,8 +33,8 @@ struct ScanContextConfig {
  * 各通道沿 row 堆叠：
  *   - channel 0 (max-height):  rows[0, num_rings)             — cell 内最大 z，归一化到 [0,1]
  *   - channel 1 (log-density): rows[num_rings, 2*num_rings)   — log2(1+count) 归一化到 [0,1]
- *   - channel 2 (z-range):     rows[2*num_rings, 3*num_rings) — cell 内 (max_z - min_z) 归一化到 [0,1]
- * col 维度是 sector（angle, CCW 增长）。空 cell 在三通道均为 0。
+ *   - channel 2 (z-range):     rows[2*num_rings, 3*num_rings) — cell 内 (max_z - min_z) 归一化到
+ * [0,1] col 维度是 sector（angle, CCW 增长）。空 cell 在三通道均为 0。
  */
 struct ScanContextDescriptor {
     int num_rings = 0;
@@ -44,7 +44,7 @@ struct ScanContextDescriptor {
 };
 
 /**
- * @brief 一个 SC 候选种子（来自 top-k 查询或 fallback 生成）
+ * @brief 一个 SC 候选种子（来自 top-k 查询）
  *
  * - world_position: 该候选在世界系下的位置（来自 map descriptor 关联的 grid 中心）
  * - yaw_deg:        SC 旋转匹配恢复的相对 yaw（query 相对 map 的 +CCW 偏移）
@@ -78,8 +78,8 @@ struct ShiftedDistance {
  *
  * yaw_deg = shift * 360 / num_sectors 即 query 相对 target 的 +CCW 旋转。
  */
-auto best_shifted_distance(
-    const ScanContextDescriptor& query, const ScanContextDescriptor& target) -> ShiftedDistance;
+auto best_shifted_distance(const ScanContextDescriptor& query, const ScanContextDescriptor& target)
+    -> ShiftedDistance;
 
 /**
  * @brief 计算地图哈希（FNV-1a 32-bit），与 Python generator 严格同构

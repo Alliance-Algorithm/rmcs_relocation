@@ -33,7 +33,7 @@ private:
 
 auto read_pose_parameter(
     rclcpp::Node& node, const std::string& prefix,
-    const geometry_msgs::msg::Pose& defaults = geometry_msgs::msg::Pose {})
+    const geometry_msgs::msg::Pose& defaults = geometry_msgs::msg::Pose{})
     -> geometry_msgs::msg::Pose;
 
 struct RuntimeParamsBundle {
@@ -45,19 +45,21 @@ struct RuntimeParamsBundle {
     std::string base_frame;
     double publish_tf_rate_hz = 10.0;
 
-    InitialRuntimeConfig initial_runtime_config {};
-    LocalRuntimeConfig local_runtime_config {};
-    WideRuntimeConfig wide_runtime_config {};
+    InitialRuntimeConfig initial_runtime_config{};
+    LocalRuntimeConfig local_runtime_config{};
+    LocalSafetyConfig local_safety_config{};
+    WideRuntimeConfig wide_runtime_config{};
 
-    InitialRegistrationConfig initial_registration_config {};
-    LocalRegistrationConfig local_registration_config {};
-    WideRegistrationConfig wide_registration_config {};
+    CommonRegistrationConfig common_registration_config{};
+    InitialRegistrationConfig initial_registration_config{};
+    LocalRegistrationConfig local_registration_config{};
+    WideRegistrationConfig wide_registration_config{};
 
-    InitialValidationConfig initial_validation_config {};
-    LocalValidationConfig local_validation_config {};
-    WideValidationConfig wide_validation_config {};
+    InitialValidationConfig initial_validation_config{};
+    LocalValidationConfig local_validation_config{};
+    WideValidationConfig wide_validation_config{};
 
-    ScanContextConfig scan_context_config {};
+    ScanContextConfig scan_context_config{};
 
     bool log_failure_details = false;
 };

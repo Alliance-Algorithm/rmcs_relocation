@@ -1,85 +1,78 @@
 #include "collector.hpp"
-#include "tools/geometry_tools.hpp"
 #include "tools/numeric_tools.hpp"
 #include "tools/registration_tools.hpp"
 
 #include <algorithm>
 #include <chrono>
+#include <cstddef>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
 #include <utility>
 
-#include <Eigen/Geometry>
 #include <rclcpp/qos.hpp>
+#include <rclcpp/time.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
-#include <tf2/exceptions.h>
-#include <tf2/time.h>
 
 namespace rmcs::location {
+
+namespace {
+
+/// 累积过程中需要在订阅回调和主线程之间共享的可变状态。
+struct CollectorState {
+    std::shared_ptr<PointCloud> accumulated;
+    rclcpp::Time first_stamp{0, 0, RCL_ROS_TIME};
+    rclcpp::Time last_stamp{0, 0, RCL_ROS_TIME};
+    std::size_t frame_count = 0;
+};
+
+} // namespace
 
 /**
  * @brief 点云收集器内部实现
  *
- * 负责从指定 ROS 话题订阅点云，持续采集指定时长，将每帧点云转换到 odom 坐标系后累加，
- * 最终返回累积后的完整点云。采集期间阻塞调用线程。
+ * 负责从指定 ROS 话题订阅 odom 系点云，持续采集指定时长，将每帧点云累加到累积点云中，
+ * 同时记录首末帧 stamp 与帧数。采集期间阻塞调用线程。
  */
 struct Collector::Impl {
-    explicit Impl(std::string odom_frame)
-        : odom_frame_(std::move(odom_frame)) {}
-
-    auto lookup_frame_to_odom(
-        tf2_ros::Buffer& tf_buffer, const std::string& frame_id, Eigen::Isometry3f& transform) const
-        -> bool {
-        if (frame_id.empty())
-            return false;
-        try {
-            const auto stamp = tf_buffer.lookupTransform(odom_frame_, frame_id, tf2::TimePointZero);
-            transform = tools::transform_to_isometry(stamp.transform);
-            return true;
-        } catch (const tf2::TransformException&) {
-            return false;
-        }
-    }
-
     /**
-     * @brief 采集指定时长内的点云并转换到 odom 坐标系
+     * @brief 采集指定时长内的 odom 系点云
      *
-     * 创建临时订阅，每收到一帧点云即通过 TF 转换到 odom 坐标系并累加到累积点云中。
-     * 采集时长到期后销毁订阅并返回结果。
-     *
+     * 创建临时订阅，每收到一帧 frame_id 匹配的点云即累加到累积点云中并更新时间戳。
+     * 采集时长到期或累积点数达到 min_points 后销毁订阅并返回结果。
      */
     auto collect(
-        rclcpp::Node& node, tf2_ros::Buffer& tf_buffer,
-        const rclcpp::CallbackGroup::SharedPtr& callback_group, const std::string& topic_name,
-        double duration_sec, int min_points) const -> std::shared_ptr<PointCloud> {
-        auto accumulated = std::make_shared<PointCloud>();
-        auto cloud_mutex = std::make_shared<std::mutex>();
+        rclcpp::Node& node, const rclcpp::CallbackGroup::SharedPtr& callback_group,
+        const std::string& topic_name, const std::string& expected_frame_id, double duration_sec,
+        int min_points) const -> CollectedCloud {
+        auto state = std::make_shared<CollectorState>();
+        state->accumulated = std::make_shared<PointCloud>();
+        auto state_mutex = std::make_shared<std::mutex>();
 
         rclcpp::SubscriptionOptions options;
         options.callback_group = callback_group;
         auto subscription = node.create_subscription<sensor_msgs::msg::PointCloud2>(
             topic_name, rclcpp::SensorDataQoS(),
-            [this, accumulated, cloud_mutex,
-             &tf_buffer](const sensor_msgs::msg::PointCloud2::SharedPtr message) {
+            [state, state_mutex,
+             expected_frame_id](const sensor_msgs::msg::PointCloud2::SharedPtr message) {
                 if (!message)
                     return;
-
-                auto frame_to_odom = Eigen::Isometry3f::Identity();
-                if (!lookup_frame_to_odom(tf_buffer, message->header.frame_id, frame_to_odom))
+                if (!expected_frame_id.empty() && message->header.frame_id != expected_frame_id)
                     return;
 
                 auto cloud = PointCloud{};
                 if (!tools::from_ros_pointcloud(*message, cloud))
                     return;
 
-                auto transformed = PointCloud{};
-                if (!tools::transform_pointcloud(cloud, frame_to_odom, transformed))
-                    return;
+                const auto stamp = rclcpp::Time{message->header.stamp, RCL_ROS_TIME};
 
-                auto lock = std::scoped_lock{*cloud_mutex};
-                *accumulated += transformed;
+                auto lock = std::scoped_lock{*state_mutex};
+                *state->accumulated += cloud;
+                if (state->frame_count == 0)
+                    state->first_stamp = stamp;
+                state->last_stamp = stamp;
+                state->frame_count += 1;
             },
             options);
 
@@ -92,33 +85,41 @@ struct Collector::Impl {
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
             if (early_stop_threshold == 0)
                 continue;
-            // 短暂取锁读 size：回调写入 accumulated 也持同一把锁，可见性安全。
             auto current_size = std::size_t{0};
             {
-                auto lock = std::scoped_lock{*cloud_mutex};
-                current_size = accumulated->size();
+                auto lock = std::scoped_lock{*state_mutex};
+                current_size = state->accumulated->size();
             }
             if (current_size >= early_stop_threshold)
                 break;
         }
 
         subscription.reset();
-        return accumulated;
-    }
 
-    std::string odom_frame_;
+        auto result = CollectedCloud{};
+        auto lock = std::scoped_lock{*state_mutex};
+        result.cloud = state->accumulated;
+        result.frame_count = state->frame_count;
+        if (state->frame_count > 0) {
+            // 取首末帧 stamp 的中点作为本次累积点云的参考时刻。
+            const auto half = (state->last_stamp - state->first_stamp) * 0.5;
+            result.reference_stamp = state->first_stamp + half;
+        }
+        return result;
+    }
 };
 
-Collector::Collector(std::string odom_frame)
-    : pimpl_(std::make_unique<Impl>(std::move(odom_frame))) {}
+Collector::Collector()
+    : pimpl_(std::make_unique<Impl>()) {}
 
 Collector::~Collector() = default;
 
 auto Collector::collect(
-    rclcpp::Node& node, tf2_ros::Buffer& tf_buffer,
-    const rclcpp::CallbackGroup::SharedPtr& callback_group, const std::string& topic_name,
-    double duration_sec, int min_points) const -> std::shared_ptr<PointCloud> {
-    return pimpl_->collect(node, tf_buffer, callback_group, topic_name, duration_sec, min_points);
+    rclcpp::Node& node, const rclcpp::CallbackGroup::SharedPtr& callback_group,
+    const std::string& topic_name, const std::string& expected_frame_id, double duration_sec,
+    int min_points) const -> CollectedCloud {
+    return pimpl_->collect(
+        node, callback_group, topic_name, expected_frame_id, duration_sec, min_points);
 }
 
 } // namespace rmcs::location

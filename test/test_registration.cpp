@@ -14,6 +14,14 @@ namespace test_helpers = rmcs::location::test;
 
 namespace {
 
+auto default_common_config() -> CommonRegistrationConfig {
+    auto config = CommonRegistrationConfig{};
+    config.preprocess.voxel_leaf_m = 0.1;
+    config.preprocess.outlier_mean_k = 20;
+    config.preprocess.outlier_stddev_mul_thresh = 1.0;
+    return config;
+}
+
 auto default_initial_config() -> InitialRegistrationConfig {
     auto config = InitialRegistrationConfig{};
     config.coarse_iterations = 20;
@@ -23,9 +31,6 @@ auto default_initial_config() -> InitialRegistrationConfig {
     config.yaw_search_window_deg = 30.0;
     config.coarse_yaw_step_deg = 10.0;
     config.coarse_top_k = 1;
-    config.voxel_leaf_m = 0.1;
-    config.outlier_mean_k = 20;
-    config.outlier_stddev_mul_thresh = 1.0;
     return config;
 }
 
@@ -53,9 +58,10 @@ auto yaw_error_deg(const Eigen::Isometry3f& a, const Eigen::Isometry3f& b) -> fl
 } // namespace
 
 TEST(RegistrationTest, RunInitialRecoversKnownTransform) {
+    const auto common_config = default_common_config();
     const auto config = default_initial_config();
     auto raw_map = test_helpers::create_cube_cloud(5.0F, 0.2F);
-    auto map_target = preprocess_map(raw_map, config);
+    auto map_target = preprocess_map(raw_map, common_config.preprocess);
     const auto applied = make_transform(0.3F, -0.2F, 0.0F, 15.0F);
     auto query_cloud = test_helpers::apply_transform(*raw_map, 0.3F, -0.2F, 0.0F, 15.0F);
 
@@ -63,7 +69,8 @@ TEST(RegistrationTest, RunInitialRecoversKnownTransform) {
     auto score = 99.0;
     const auto guess = Eigen::Isometry3f::Identity();
 
-    const auto ok = run_initial(config, query_cloud, map_target, guess, result, score);
+    const auto ok =
+        run_initial(common_config, config, query_cloud, map_target, guess, result, score);
 
     ASSERT_TRUE(ok);
     EXPECT_LT(score, 0.08);
@@ -74,18 +81,20 @@ TEST(RegistrationTest, RunInitialRecoversKnownTransform) {
 }
 
 TEST(RegistrationTest, YawRecoveryWithinWindow) {
+    const auto common_config = default_common_config();
     auto config = default_initial_config();
     config.yaw_search_window_deg = 90.0;
     config.coarse_yaw_step_deg = 15.0;
 
     auto raw_map = test_helpers::create_cube_cloud(5.0F, 0.3F);
-    auto map_target = preprocess_map(raw_map, config);
+    auto map_target = preprocess_map(raw_map, common_config.preprocess);
     auto query_cloud = test_helpers::apply_transform(*raw_map, 0.0F, 0.0F, 0.0F, 30.0F);
 
     auto result = Eigen::Isometry3f::Identity();
     auto score = 99.0;
     const auto ok = run_initial(
-        config, query_cloud, map_target, Eigen::Isometry3f::Identity(), result, score);
+        common_config, config, query_cloud, map_target, Eigen::Isometry3f::Identity(), result,
+        score);
     ASSERT_TRUE(ok);
 
     const auto expected = make_transform(0.0F, 0.0F, 0.0F, 30.0F).inverse();

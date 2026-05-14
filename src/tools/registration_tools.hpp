@@ -15,6 +15,35 @@ namespace rmcs::location {
 using Point = pcl::PointXYZ;
 using PointCloud = pcl::PointCloud<Point>;
 
+/**
+ * @brief INITIAL / LOCAL / WIDE 共用点云预处理参数
+ */
+struct PointCloudPreprocessConfig {
+    double voxel_leaf_m = 0.2;
+    int outlier_mean_k = 30;
+    double outlier_stddev_mul_thresh = 0.5;
+};
+
+/**
+ * @brief small_gicp PCL adapter 共用参数
+ */
+struct GicpConfig {
+    int num_threads = 4;
+    int num_neighbors_for_covariance = 20;
+    double rotation_epsilon = 2e-3;
+    double voxel_resolution = 0.2;
+    double coarse_transformation_epsilon = 1e-3;
+    double precise_transformation_epsilon = 1e-4;
+};
+
+/**
+ * @brief 三种模式共用的配准底层参数
+ */
+struct CommonRegistrationConfig {
+    PointCloudPreprocessConfig preprocess{};
+    GicpConfig gicp{};
+};
+
 struct InitialRegistrationConfig {
     int coarse_iterations = 12;
     int precise_iterations = 20;
@@ -24,10 +53,6 @@ struct InitialRegistrationConfig {
     double yaw_search_window_deg = 15.0;
     double coarse_yaw_step_deg = 15.0;
     std::size_t coarse_top_k = 1;
-
-    double voxel_leaf_m = 0.2;
-    int outlier_mean_k = 30;
-    double outlier_stddev_mul_thresh = 0.5;
 };
 
 /**
@@ -43,16 +68,12 @@ struct LocalRegistrationConfig {
     double yaw_window_deg = 30.0;
     double coarse_yaw_step_deg = 15.0;
 
-    bool enable_map_consistency_filter = false;
-    double map_consistency_distance_m = 0.8;
-    double min_retained_fraction = 0.15;
-
     /// 镜像对称场地兜底；早停：seed 1 通过即返回，seed 2 仅当 seed 1 失败时才跑
     std::size_t sc_top_k = 2;
 };
 
 /**
- * @brief WIDE 模式配准参数（多 seed，全局兜底；seed 来源由 runtime 决定）
+ * @brief WIDE 模式配准参数（SC 全局 seed，seed 来源由 runtime 决定）
  */
 struct WideRegistrationConfig {
     int coarse_iterations = 15;
@@ -64,22 +85,11 @@ struct WideRegistrationConfig {
     double yaw_window_deg = 60.0;
     double coarse_yaw_step_deg = 18.0;
 
-    bool enable_map_consistency_filter = false;
-    double map_consistency_distance_m = 0.8;
-    double min_retained_fraction = 0.15;
-
     /// 从 ScanContext 描述子库取前 sc_top_k 个候选作为 wide handler 的 seed
     std::size_t sc_top_k = 5;
 
-    /// fallback 路径（SC 不可用 / 无匹配时）：以中心 + ±radius/0/0 + 0/±radius/0 共 5 个位置
-    /// 每个位置均匀 yaw_count 个朝向，做无 prior 兜底搜索
-    double fallback_position_radius_m = 3.5;
-    int fallback_yaw_count = 8;
-
     std::size_t max_candidate_count = 1;
     double rank_weight_inlier = 0.5;
-    double rank_weight_distance = 0.3;
-    double max_distance_from_prior_m = 12.0;
 };
 
 /**
@@ -118,7 +128,7 @@ auto transform_pointcloud(
  */
 auto preprocess_map(
     const std::shared_ptr<PointCloud>& raw_map_cloud,
-    const InitialRegistrationConfig& initial_config) -> std::shared_ptr<PointCloud>;
+    const PointCloudPreprocessConfig& preprocess_config) -> std::shared_ptr<PointCloud>;
 
 /**
  * @brief INITIAL 重定位：单 seed，由用户提供的 initial_guess 驱动。
@@ -126,7 +136,7 @@ auto preprocess_map(
  * @param map_target_cloud 由 preprocess_map() 产出的全图 target（不再切 submap）
  */
 auto run_initial(
-    const InitialRegistrationConfig& initial_config,
+    const CommonRegistrationConfig& common_config, const InitialRegistrationConfig& initial_config,
     const std::shared_ptr<PointCloud>& query_odom_cloud,
     const std::shared_ptr<PointCloud>& map_target_cloud,
     const Eigen::Isometry3f& world_to_odom_guess, Eigen::Isometry3f& world_to_odom_result,
@@ -138,7 +148,7 @@ auto run_initial(
  * @param map_target_cloud 由 preprocess_map() 产出的全图 target（不再切 submap）
  */
 auto run_local(
-    const InitialRegistrationConfig& initial_config, const LocalRegistrationConfig& local_config,
+    const CommonRegistrationConfig& common_config, const LocalRegistrationConfig& local_config,
     const std::shared_ptr<PointCloud>& query_odom_cloud,
     const std::shared_ptr<PointCloud>& map_target_cloud, const RegistrationPrior& prior,
     RegistrationResult& result) -> bool;
@@ -146,11 +156,11 @@ auto run_local(
 /**
  * @brief WIDE 单 seed runner：构造时预处理 query，run() 逐 seed 复用。
  *
- * runtime 的 SC / fallback 路径需要逐 seed 早停；用 runner 避免每个 seed 重复 voxel/outlier。
+ * runtime 的 SC 路径需要逐 seed 早停；用 runner 避免每个 seed 重复 voxel/outlier。
  * map_target_cloud 由 preprocess_map() 产出，所有 seed 复用同一个 target。
  */
 class WideSeedRunner {
-    InitialRegistrationConfig initial_config_;
+    CommonRegistrationConfig common_config_;
     WideRegistrationConfig wide_config_;
     std::shared_ptr<PointCloud> filtered_query_;
     std::shared_ptr<PointCloud> map_target_cloud_;
@@ -158,7 +168,7 @@ class WideSeedRunner {
 
 public:
     WideSeedRunner(
-        const InitialRegistrationConfig& initial_config, const WideRegistrationConfig& wide_config,
+        const CommonRegistrationConfig& common_config, const WideRegistrationConfig& wide_config,
         const std::shared_ptr<PointCloud>& query_odom_cloud,
         const std::shared_ptr<PointCloud>& map_target_cloud, const RegistrationPrior& prior);
 
@@ -172,7 +182,7 @@ public:
  * @brief WIDE 重定位：单 seed 跑完整 GICP 管线。
  */
 auto run_wide_seed(
-    const InitialRegistrationConfig& initial_config, const WideRegistrationConfig& wide_config,
+    const CommonRegistrationConfig& common_config, const WideRegistrationConfig& wide_config,
     const std::shared_ptr<PointCloud>& query_odom_cloud,
     const std::shared_ptr<PointCloud>& map_target_cloud, const RegistrationPrior& prior,
     const Eigen::Isometry3f& seed_world_to_base, RegistrationResult& result) -> bool;
@@ -180,10 +190,10 @@ auto run_wide_seed(
 /**
  * @brief WIDE 重定位：多 seed 跑 GICP 后按 ranking 选最优。
  *
- * 保留给需要"一次性评估一组 seed"的调用方；SC / fallback 早停路径通常用 run_wide_seed。
+ * 保留给需要"一次性评估一组 seed"的调用方；SC 早停路径通常用 run_wide_seed。
  */
 auto run_wide(
-    const InitialRegistrationConfig& initial_config, const WideRegistrationConfig& wide_config,
+    const CommonRegistrationConfig& common_config, const WideRegistrationConfig& wide_config,
     const std::shared_ptr<PointCloud>& query_odom_cloud,
     const std::shared_ptr<PointCloud>& map_target_cloud, const RegistrationPrior& prior,
     const std::vector<Eigen::Isometry3f>& seeds_world_to_base, RegistrationResult& result) -> bool;
