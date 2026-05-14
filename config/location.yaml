@@ -2,11 +2,11 @@ rmcs_relocation:
   ros__parameters:
     # map / frame / service ---------------------------------------------------
     # 全局 PCD 地图路径，启动时读取后作为所有 GICP 匹配的 target 点云。
-    # map_path: "/rmcs_install/share/rmcs_relocation/maps/my.pcd"
-    map_path: "/workspaces/RMCS/rmcs_ws/src/rmcs-navigation-deps/rmcs_relocation/maps/my.pcd"
+    map_path: "/rmcs_install/share/rmcs_relocation/maps/1.pcd"
+    # map_path: "/workspaces/RMCS/rmcs_ws/src/rmcs-navigation-deps/rmcs_relocation/maps/my.pcd"
     # Scan Context 描述子库路径，local/wide 用它查候选 seed；配置必须和当前地图匹配。
-    # descriptor_path: "/rmcs_install/share/rmcs_relocation/maps/my.sc_desc"
-    descriptor_path: "/workspaces/RMCS/rmcs_ws/src/rmcs-navigation-deps/rmcs_relocation/maps/my.sc_desc"
+    descriptor_path: "/rmcs_install/share/rmcs_relocation/maps/1.sc_desc"
+    # descriptor_path: "/workspaces/RMCS/rmcs_ws/src/rmcs-navigation-deps/rmcs_relocation/maps/my.sc_desc"
     world_frame: "world"
     odom_frame: "odom"
     base_frame: "base_link"
@@ -18,12 +18,12 @@ rmcs_relocation:
     # field_bounds.* ---------------------------------------------------------
     # INITIAL / LOCAL / WIDE 共用的最终位姿场地边界，越界结果会被 validator 拒绝。
     field_bounds:
-        min_x: -1.0
-        max_x: 9.0
-        min_y: -2.0
-        max_y: 8.0
+        min_x: -2.0
+        max_x: 8.0
+        min_y: -3.0
+        max_y: 7.0
         min_z: -1.0
-        max_z: 3.0
+        max_z: 2.0
 
     # scan_context.* ----------------------------------------------------------
     # SC 描述子库配置必须和 maps/*.sc_desc 生成时一致，任一字段不匹配会拒绝加载。
