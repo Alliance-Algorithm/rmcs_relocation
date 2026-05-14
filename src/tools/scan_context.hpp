@@ -13,21 +13,33 @@ namespace rmcs::location {
 /**
  * @brief ScanContext 描述子配置
  */
+/// 多通道 SC：每个 (ring, sector) 同时写入若干个标量，沿 row 维度堆叠
+/// （channel 0 占用 rows[0, num_rings)，channel 1 占用 rows[num_rings, 2*num_rings)，依此类推）。
+inline constexpr int SC_CHANNEL_COUNT = 3;
+
 struct ScanContextConfig {
     int num_rings = 20;
     int num_sectors = 60;
     double max_radius_m = 20.0;
+    // z 过滤：低于 z_min_m / 高于 z_max_m 的点不参与 cell 累积。
+    // 同时这也是 channel 0/2 的归一化区间（归一化到 [0, 1]）。
+    double z_min_m = 0.15;
+    double z_max_m = 2.0;
 };
 
 /**
- * @brief 2D 极坐标描述子矩阵 (num_rings × num_sectors)
+ * @brief 多通道 2D 极坐标描述子矩阵 (num_rings * channel_count × num_sectors)
  *
- * 每个 cell 存放该 (ring, sector) 内点的最大高度 z；空 cell 为 0。
- * row=ring（半径方向，0=最近），col=sector（角度方向 atan2(y,x), [0,2π) 等分，CCW 增长）。
+ * 各通道沿 row 堆叠：
+ *   - channel 0 (max-height):  rows[0, num_rings)             — cell 内最大 z，归一化到 [0,1]
+ *   - channel 1 (log-density): rows[num_rings, 2*num_rings)   — log2(1+count) 归一化到 [0,1]
+ *   - channel 2 (z-range):     rows[2*num_rings, 3*num_rings) — cell 内 (max_z - min_z) 归一化到 [0,1]
+ * col 维度是 sector（angle, CCW 增长）。空 cell 在三通道均为 0。
  */
 struct ScanContextDescriptor {
     int num_rings = 0;
     int num_sectors = 0;
+    int channel_count = 0;
     Eigen::MatrixXf data;
 };
 

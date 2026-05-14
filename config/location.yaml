@@ -1,24 +1,18 @@
 rmcs_relocation:
   ros__parameters:
-    # -------------------------------------------------------------------------
-    # RMCS relocation 调参记录 / 定版配置
-    # -------------------------------------------------------------------------
-    # 这份参数来自 2026-05-07 本地多轮实测：
-    #   1. initial：机器人启动时位姿基本就在原点，initial_guess 很准；失败主要是 GICP coarse 偶发不收敛。
-    #   2. local：近原点/小范围运动中重定位，精度要求不高，速度优先；之前失败主要是 GICP 参数太紧。
-    #   3. wide：兜底方案，调用时机器人会停下；优先级是成功率和正确性，其次才是速度。
-    #
     # 调参总原则：
-    #   - 看到 "GICP coarse failed"：先放宽 max_correspondence_distance_m / 增加 coarse_iterations / 增大 submap_radius_m。
+    #   - 看到 "GICP coarse failed"：先放宽 max_correspondence_distance_m / 增加 coarse_iterations。
     #   - 看到 "registration rejected: score,inlier"：GICP 已经收敛，但验收质量不够；先确认是否假匹配，再动 score/inlier。
     #   - 看到 "out_of_bounds / yaw / distance"：通常是镜像或错误 seed，不要盲目放宽验收。
     #   - local/wide 的 SC seed 位置是描述子网格中心，不是最终估计位姿；看 accepted 日志里的 estimated。
     #   - 注释里的 score/inlier 范围是本机本地图测试经验，实车上只作为参考。
+    #   - GICP target 是启动时一次性 voxel + outlier 处理的全图；不再按 seed 切 submap。
 
     # map / frame / service ---------------------------------------------------
-    map_path: "/workspaces/RMCS/rmcs_ws/src/rmcs-navigation-deps/rmcs_relocation/maps/1.pcd"
-    # map_path: "/tmp/point-lio/1.pcd"
-    descriptor_path: "/workspaces/RMCS/rmcs_ws/src/rmcs-navigation-deps/rmcs_relocation/maps/1.sc_desc"
+    map_path: "/rmcs_install/share/rmcs_relocation/maps/1.pcd"
+    # map_path: "/workspaces/RMCS/rmcs_ws/src/rmcs-navigation-deps/rmcs_relocation/maps/my.pcd"
+    descriptor_path: "/rmcs_install/share/rmcs_relocation/maps/1.sc_desc"
+    # descriptor_path: "/workspaces/RMCS/rmcs_ws/src/rmcs-navigation-deps/rmcs_relocation/maps/my.sc_desc"
     world_frame: "world"
     odom_frame: "odom"
     base_frame: "base_link"
@@ -26,93 +20,65 @@ rmcs_relocation:
     publish_tf_rate_hz: 10.0
 
     # scan_context.* ----------------------------------------------------------
-    # SC 描述子库配置必须和 maps/*.sc_desc 生成时一致。
-    # 本地图日志：descriptor loaded: 285 entries (rings=20, sectors=60, radius=20.00m)。
+    # SC 描述子库配置必须和 maps/*.sc_desc 生成时一致（任一字段不匹配会拒绝加载）。
     # sectors=60 表示 yaw 量化约 6deg，所以 local/wide SC 主路径一般按 6deg 步长补偿。
+    # 多通道 SC：每个 cell 同时编码 max_z / log-density / z-range，沿 row 堆叠 3 倍。
+    # z_min_m / z_max_m 既是构建时的高度过滤区间，也是通道 0/2 的归一化分母：
+    #   - 调高 z_min 可滤掉地面噪点（但太高会丢真实障碍底部）；
+    #   - 调低 z_max 可滤掉天花板 / 标定残点。
     scan_context:
         num_rings: 20
         num_sectors: 60
         max_radius_m: 20.0
+        z_min_m: 0.05
+        z_max_m: 3.0
 
     # diagnostics.* -----------------------------------------------------------
-    # 打开后会打印 coarse/refine/precise 阶段的 tried/converged/score/inlier。
-    # 这些日志是调参依据，建议实车首轮保留；稳定后如果嫌刷屏可关。
+    # 打开后会打印 coarse/precise 阶段的 tried/converged/score/inlier。
     diagnostics:
         log_failure_details: true
-
-    # -------------------------------------------------------------------------
-    # initial.* — MODE_INITIAL=0
-    # -------------------------------------------------------------------------
-    # 用途：启动后第一次建立 world->odom。当前策略假设机器人初始位置就在原点附近，
-    # initial_guess_world_base 很准，因此 initial 不需要全局搜索，只需要保证原点附近 GICP 稳定收敛。
-    #
-    # 本轮测试结论：
-    #   - 旧参数 submap_radius=4.0, max_corr=1.8 时，偶发 coarse failed，失败样例 target≈1273。
-    #   - 调到 submap_radius=5.0, max_corr=3.0, coarse_iter=20 后，多轮无失败。
-    #   - 新参数下正常 score 约 0.31~0.35，inlier 约 0.32~0.34。
-    #   - score 变大是因为 max_corr 放宽后 fitness 尺度变了，不代表结果变差；看 accepted 和最终位姿。
-    #
+    
     # 如果实车 initial 又偶发 coarse failed：
     #   1. 先把 max_correspondence_distance_m 从 3.0 加到 4.0。
     #   2. 再考虑 collect_duration_sec 加到 2.5 或 min_accumulated_points 加到 2500。
     #   3. 最后才考虑 coarse_iterations 增加；不要先放宽 initial_max_* 验收。
     initial:
         # [initial-1] 点云采集
-        # initial 只跑一次，可以采久一点换稳定性。当前 2.0s 在本地图约 5000 点。
         pointcloud_topic: "/cloud_registered_undistort"
         collect_duration_sec: 2.0
-        min_accumulated_points: 2000
+        min_accumulated_points: 2500
 
         # [initial-2] 点云预处理
-        # voxel=0.2 是目前速度/稳定性的折中；initial 不需要更密。
-        # outlier_stddev=0.8 比默认略严，能压掉少量动态点，但不要调太低，否则有效结构会被删。
+
         voxel_leaf_m: 0.2
         outlier_mean_k: 30
         outlier_stddev_mul_thresh: 0.8
 
-        # [initial-3] 子图与 GICP 收敛裕量
-        # initial 位置很准，submap_radius 不承担全局搜索，只保证周围结构够多。
-        # max_corr=3.0 是解决 coarse 偶发不收敛的核心参数；旧值 1.8 太紧。
-        submap_radius_m: 5.0
-        coarse_iterations: 20
-        refine_iterations: 8
-        precise_iterations: 25
-        max_correspondence_distance_m: 3.0
-        score_threshold: 0.5
+        # [initial-3] GICP 收敛裕量（target = 启动时预 voxel 化的全图，不再切 submap）
+        coarse_iterations: 80
+        precise_iterations: 50
+        max_correspondence_distance_m: 4.0
+        score_threshold: 0.013
 
         # [initial-4] yaw 搜索
-        # initial guess 准时，yaw_window=30 足够兜住启动时小角度偏差。
-        # step=10 会生成 0,+10,-10,+20,-20,+30,-30 共 7 个 coarse 候选。
-        yaw_search_window_deg: 30.0
+        # step=10 会生成 0,+10,-10,+20,-20,+30,-30 共 9 个 coarse 候选。
+        yaw_search_window_deg: 40.0
         coarse_yaw_step_deg: 10.0
-        refine_yaw_step_deg: 10.0
         coarse_top_k: 1
 
         # [initial-5] 最终验收
-        # 因为初始位置确定在原点附近，这里保持严格：最终估计不能离 initial_guess 太远。
         # initial 不看 inlier 验收，只看 score / 距离 / yaw / field_bounds。
         initial_max_translation_error_m: 0.5
         initial_max_yaw_error_deg: 30.0
         field_bounds:
-          min_x: -2.0
-          max_x: 7.0
-          min_y: -3.5
-          max_y: 3.5
+          min_x: -1.0
+          max_x: 9.0
+          min_y: -2.0
+          max_y: 8.0
           min_z: -1.0
-          max_z: 2.0
+          max_z: 3.0
 
-    # -------------------------------------------------------------------------
-    # local.* — MODE_LOCAL=1
-    # -------------------------------------------------------------------------
-    # 用途：运行中/近原点小范围内的快速局部纠正。精度不追 initial 级别，优先稳定和速度。
     # local 会先查 SC top-K，通常 SC[0] 就是当前位置附近，然后以该 seed 跑 GICP。
-    #
-    # 本轮测试结论：
-    #   - 人在座位周围活动不是主要失败原因；关闭 map consistency 后仍稳定。
-    #   - 真正原因是 GICP 参数太紧，典型日志是 "local seed[0] GICP not converged"。
-    #   - local 定版后，高强度 40cm 平移/小角度转动测试通过。
-    #   - 正常 score 约 0.32~0.40，inlier 约 0.45~0.52；高速/大角度时 inlier 会下降。
-    #
     # 如果 local 又出现 coarse failed：
     #   1. 先确认 seed setup 里的 yaw/step/max_corr 是否仍是 12/6/4.0。
     #   2. 偶发失败可以接受；连续失败先把 coarse_iterations 加到 18。
@@ -120,30 +86,25 @@ rmcs_relocation:
     #   4. 不建议先打开 map consistency，它会增加动态场景下的不确定性。
     local:
         # [local-1] 点云采集
-        # local 可能在运动中调用，采集窗口越长越容易有运动畸变；0.4s 是速度/点数折中。
         pointcloud_topic: "/cloud_registered_undistort"
-        collect_duration_sec: 0.4
+        collect_duration_sec: 0.5
         min_accumulated_points: 700
 
-        # [local-2] 子图与 GICP
+        # [local-2] GICP（target = 启动时预 voxel 化的全图，不再切 submap）
         # max_corr=4.0 是 local 成功率的核心；之前收得太紧会导致 coarse 不收敛。
         # precise_iterations=8 已够用，继续加只会变慢，精度收益不明显。
-        submap_radius_m: 5.0
-        coarse_iterations: 15
-        refine_iterations: 6
-        precise_iterations: 8
+        coarse_iterations: 50
+        precise_iterations: 20
         max_correspondence_distance_m: 4.0
-        coarse_score_threshold: 0.5
+        coarse_score_threshold: 0.01
 
         # [local-3] yaw 搜索
         # SC sectors=60，yaw 量化约 6deg。窗口 ±12deg + step 6deg 会试 0,±6,±12。
         # 这个窗口是 local 稳定性的核心之一；太小会大角度失败，太大会变慢并增加误收敛。
-        yaw_window_deg: 12.0
-        coarse_yaw_step_deg: 6.0
-        refine_yaw_step_deg: 6.0
+        yaw_window_deg: 6.0
+        coarse_yaw_step_deg: 3.0
 
         # [local-4] map consistency filter
-        # 本地图实测：动态人/座位附近活动不是主因，过滤反而可能删掉有用点。
         # local 目前关闭。只有动态障碍物极多且误匹配明显时再考虑打开。
         enable_map_consistency_filter: false
         map_consistency_distance_m: 2.0
@@ -151,23 +112,22 @@ rmcs_relocation:
 
         # [local-5] SC seed 数
         # local 目标是快；top1 正确率足够高，失败时直接下一轮重试即可。
-        # 增加 top_k 会让错误镜像 seed 参与 GICP，拖慢且不一定提高成功率。
         sc_top_k: 1
 
         # [local-6] 验收
         # local 允许精度没那么高，但必须拦住跨半场/镜像错配。
         # min_inlier_ratio=0.08 很宽，主要靠 distance/yaw/field_bounds 限制错误结果。
-        score_threshold: 0.50
-        min_inlier_ratio: 0.08
+        score_threshold: 0.55
+        min_inlier_ratio: 0.05
         max_distance_from_prior_m: 6.0
         max_yaw_from_prior_deg: 120.0
         field_bounds:
-          min_x: -2.0
-          max_x: 7.0
-          min_y: -3.5
-          max_y: 3.5
+          min_x: -1.0
+          max_x: 9.0
+          min_y: -2.0
+          max_y: 8.0
           min_z: -1.0
-          max_z: 2.0
+          max_z: 3.0
 
     # -------------------------------------------------------------------------
     # wide.* — MODE_WIDE=2
@@ -201,12 +161,10 @@ rmcs_relocation:
         collect_duration_sec: 1.5
         min_accumulated_points: 2000
 
-        # [wide-2] 子图与 GICP
+        # [wide-2] GICP（target = 启动时预 voxel 化的全图，不再切 submap）
         # wide 主路径多数 SC[0] 一次成功，正常耗时约 1~1.5s。
         # max_corr=4.0 保证 SC seed 有少量位置/yaw 偏差时仍能收敛。
-        submap_radius_m: 5.0
         coarse_iterations: 15
-        refine_iterations: 6
         precise_iterations: 15
         max_correspondence_distance_m: 4.0
         coarse_score_threshold: 0.5
@@ -217,7 +175,6 @@ rmcs_relocation:
         # 因此 fallback_yaw_count 比 yaw_window 更关键。
         yaw_window_deg: 12.0
         coarse_yaw_step_deg: 15.0
-        refine_yaw_step_deg: 10.0
 
         # [wide-4] SC 主路径 seed
         # 实测 top6 后几个大多是镜像候选，top3 是当前折中。
@@ -249,9 +206,9 @@ rmcs_relocation:
         max_distance_from_prior_m: 12.0
         max_yaw_from_prior_deg: 120.0
         field_bounds:
-          min_x: -2.0
-          max_x: 7.0
-          min_y: -3.5
-          max_y: 3.5
+          min_x: -1.0
+          max_x: 9.0
+          min_y: -2.0
+          max_y: 8.0
           min_z: -1.0
-          max_z: 2.0
+          max_z: 3.0

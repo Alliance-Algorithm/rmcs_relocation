@@ -6,7 +6,6 @@
 #include <vector>
 
 #include <Eigen/Geometry>
-#include <pcl/kdtree/kdtree_flann.h>
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
 #include <sensor_msgs/msg/point_cloud2.hpp>
@@ -18,14 +17,12 @@ using PointCloud = pcl::PointCloud<Point>;
 
 struct InitialRegistrationConfig {
     int coarse_iterations = 12;
-    int refine_iterations = 8;
     int precise_iterations = 20;
 
     double max_correspondence_distance_m = 0.5;
     double score_threshold = 0.04;
     double yaw_search_window_deg = 15.0;
     double coarse_yaw_step_deg = 15.0;
-    double refine_yaw_step_deg = 15.0;
     std::size_t coarse_top_k = 1;
 
     double voxel_leaf_m = 0.2;
@@ -38,7 +35,6 @@ struct InitialRegistrationConfig {
  */
 struct LocalRegistrationConfig {
     int coarse_iterations = 12;
-    int refine_iterations = 6;
     int precise_iterations = 12;
 
     double max_correspondence_distance_m = 4.0;
@@ -46,9 +42,6 @@ struct LocalRegistrationConfig {
 
     double yaw_window_deg = 30.0;
     double coarse_yaw_step_deg = 15.0;
-    double refine_yaw_step_deg = 12.0;
-
-    double submap_radius_m = 5.0;
 
     bool enable_map_consistency_filter = false;
     double map_consistency_distance_m = 0.8;
@@ -63,7 +56,6 @@ struct LocalRegistrationConfig {
  */
 struct WideRegistrationConfig {
     int coarse_iterations = 15;
-    int refine_iterations = 10;
     int precise_iterations = 25;
 
     double max_correspondence_distance_m = 4.0;
@@ -71,9 +63,6 @@ struct WideRegistrationConfig {
 
     double yaw_window_deg = 60.0;
     double coarse_yaw_step_deg = 18.0;
-    double refine_yaw_step_deg = 12.0;
-
-    double submap_radius_m = 6.0;
 
     bool enable_map_consistency_filter = false;
     double map_consistency_distance_m = 0.8;
@@ -120,50 +109,58 @@ auto from_ros_pointcloud(const sensor_msgs::msg::PointCloud2& message, PointClou
 auto transform_pointcloud(
     const PointCloud& source, const Eigen::Isometry3f& transform, PointCloud& target) -> bool;
 
-auto extract_submap_radius(
-    const std::shared_ptr<PointCloud>& map_world_cloud, const Eigen::Vector3f& center,
-    double radius_m, double fallback_radius_m) -> std::shared_ptr<PointCloud>;
+/**
+ * @brief 启动时一次性预处理全局地图（voxel 下采样 + statistical outlier 移除）
+ *
+ * 处理后的 cloud 直接作为 initial / local / wide 各路径的 GICP target。
+ * 让 query 里的"场外/远处"点找到对应（RM 镜像消歧的关键信号），
+ * 同时省掉 per-seed 的 voxel + outlier 开销。
+ */
+auto preprocess_map(
+    const std::shared_ptr<PointCloud>& raw_map_cloud,
+    const InitialRegistrationConfig& initial_config) -> std::shared_ptr<PointCloud>;
 
-auto extract_submap_radius(
-    const pcl::KdTreeFLANN<Point>& kdtree, const std::shared_ptr<PointCloud>& map_world_cloud,
-    const Eigen::Vector3f& center, double radius_m, double fallback_radius_m)
-    -> std::shared_ptr<PointCloud>;
-
+/**
+ * @brief INITIAL 重定位：单 seed，由用户提供的 initial_guess 驱动。
+ *
+ * @param map_target_cloud 由 preprocess_map() 产出的全图 target（不再切 submap）
+ */
 auto run_initial(
     const InitialRegistrationConfig& initial_config,
     const std::shared_ptr<PointCloud>& query_odom_cloud,
-    const std::shared_ptr<PointCloud>& map_world_cloud,
+    const std::shared_ptr<PointCloud>& map_target_cloud,
     const Eigen::Isometry3f& world_to_odom_guess, Eigen::Isometry3f& world_to_odom_result,
     double& score) -> bool;
 
 /**
  * @brief LOCAL 重定位：单 seed 走多阶段 GICP，依赖 prior 准确
+ *
+ * @param map_target_cloud 由 preprocess_map() 产出的全图 target（不再切 submap）
  */
 auto run_local(
     const InitialRegistrationConfig& initial_config, const LocalRegistrationConfig& local_config,
     const std::shared_ptr<PointCloud>& query_odom_cloud,
-    const std::shared_ptr<PointCloud>& map_world_cloud, const pcl::KdTreeFLANN<Point>& map_kdtree,
-    const RegistrationPrior& prior, RegistrationResult& result) -> bool;
+    const std::shared_ptr<PointCloud>& map_target_cloud, const RegistrationPrior& prior,
+    RegistrationResult& result) -> bool;
 
 /**
  * @brief WIDE 单 seed runner：构造时预处理 query，run() 逐 seed 复用。
  *
  * runtime 的 SC / fallback 路径需要逐 seed 早停；用 runner 避免每个 seed 重复 voxel/outlier。
+ * map_target_cloud 由 preprocess_map() 产出，所有 seed 复用同一个 target。
  */
 class WideSeedRunner {
     InitialRegistrationConfig initial_config_;
     WideRegistrationConfig wide_config_;
     std::shared_ptr<PointCloud> filtered_query_;
-    std::shared_ptr<PointCloud> map_world_cloud_;
-    const pcl::KdTreeFLANN<Point>& map_kdtree_;
+    std::shared_ptr<PointCloud> map_target_cloud_;
     RegistrationPrior prior_;
 
 public:
     WideSeedRunner(
         const InitialRegistrationConfig& initial_config, const WideRegistrationConfig& wide_config,
         const std::shared_ptr<PointCloud>& query_odom_cloud,
-        const std::shared_ptr<PointCloud>& map_world_cloud,
-        const pcl::KdTreeFLANN<Point>& map_kdtree, const RegistrationPrior& prior);
+        const std::shared_ptr<PointCloud>& map_target_cloud, const RegistrationPrior& prior);
 
     [[nodiscard]] auto valid() const -> bool;
 
@@ -177,20 +174,18 @@ public:
 auto run_wide_seed(
     const InitialRegistrationConfig& initial_config, const WideRegistrationConfig& wide_config,
     const std::shared_ptr<PointCloud>& query_odom_cloud,
-    const std::shared_ptr<PointCloud>& map_world_cloud, const pcl::KdTreeFLANN<Point>& map_kdtree,
-    const RegistrationPrior& prior, const Eigen::Isometry3f& seed_world_to_base,
-    RegistrationResult& result) -> bool;
+    const std::shared_ptr<PointCloud>& map_target_cloud, const RegistrationPrior& prior,
+    const Eigen::Isometry3f& seed_world_to_base, RegistrationResult& result) -> bool;
 
 /**
  * @brief WIDE 重定位：多 seed 跑 GICP 后按 ranking 选最优。
  *
- * 保留给需要“一次性评估一组 seed”的调用方；SC / fallback 早停路径通常用 run_wide_seed。
+ * 保留给需要"一次性评估一组 seed"的调用方；SC / fallback 早停路径通常用 run_wide_seed。
  */
 auto run_wide(
     const InitialRegistrationConfig& initial_config, const WideRegistrationConfig& wide_config,
     const std::shared_ptr<PointCloud>& query_odom_cloud,
-    const std::shared_ptr<PointCloud>& map_world_cloud, const pcl::KdTreeFLANN<Point>& map_kdtree,
-    const RegistrationPrior& prior, const std::vector<Eigen::Isometry3f>& seeds_world_to_base,
-    RegistrationResult& result) -> bool;
+    const std::shared_ptr<PointCloud>& map_target_cloud, const RegistrationPrior& prior,
+    const std::vector<Eigen::Isometry3f>& seeds_world_to_base, RegistrationResult& result) -> bool;
 
 } // namespace rmcs::location::tools

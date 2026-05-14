@@ -11,6 +11,7 @@
 #include <cstring>
 #include <limits>
 #include <numbers>
+#include <vector>
 
 namespace rmcs::location::tools {
 
@@ -39,44 +40,96 @@ constexpr std::size_t HASH_MAX_SAMPLES = 10000;
 
 } // namespace
 
+namespace {
+
+/// log2(1 + 64) ≈ 6.022 — 通道 1 的归一化分母，>=64 个点封顶到 1。
+constexpr float DENSITY_LOG_DENOM = 6.022368f;
+
+struct CellAccum {
+    float max_z = -std::numeric_limits<float>::infinity();
+    float min_z = std::numeric_limits<float>::infinity();
+    std::uint32_t count = 0;
+};
+
+} // namespace
+
 auto build_descriptor(const PointCloud& cloud, const ScanContextConfig& config)
     -> ScanContextDescriptor {
     auto descriptor = ScanContextDescriptor {};
     descriptor.num_rings = std::max(1, config.num_rings);
     descriptor.num_sectors = std::max(1, config.num_sectors);
-    descriptor.data = Eigen::MatrixXf::Zero(descriptor.num_rings, descriptor.num_sectors);
+    descriptor.channel_count = SC_CHANNEL_COUNT;
+
+    const auto rings = descriptor.num_rings;
+    const auto sectors = descriptor.num_sectors;
+    const auto channels = descriptor.channel_count;
+
+    descriptor.data = Eigen::MatrixXf::Zero(rings * channels, sectors);
 
     if (cloud.empty())
         return descriptor;
 
     const auto max_radius = std::max(1e-3, config.max_radius_m);
     const auto two_pi = 2.0 * std::numbers::pi;
-    const auto sector_step = two_pi / static_cast<double>(descriptor.num_sectors);
-    const auto ring_step_inv =
-        static_cast<double>(descriptor.num_rings) / max_radius;
+    const auto sector_step = two_pi / static_cast<double>(sectors);
+    const auto ring_step_inv = static_cast<double>(rings) / max_radius;
+
+    // z 过滤区间也是 channel 0 / channel 2 的归一化分母。
+    const auto z_min = static_cast<float>(config.z_min_m);
+    const auto z_max = static_cast<float>(config.z_max_m);
+    const auto z_span = std::max(1e-3f, z_max - z_min);
+
+    auto cells = std::vector<CellAccum>(static_cast<std::size_t>(rings) * static_cast<std::size_t>(sectors));
 
     for (const auto& point : cloud.points) {
+        const auto z = static_cast<float>(point.z);
+        if (z < z_min || z > z_max)
+            continue;
+
         const auto range = std::hypot(static_cast<double>(point.x), static_cast<double>(point.y));
         if (range >= max_radius || range < 1e-6)
             continue;
 
         auto ring = static_cast<int>(range * ring_step_inv);
-        if (ring < 0 || ring >= descriptor.num_rings)
+        if (ring < 0 || ring >= rings)
             continue;
 
-        auto angle =
-            std::atan2(static_cast<double>(point.y), static_cast<double>(point.x));
+        auto angle = std::atan2(static_cast<double>(point.y), static_cast<double>(point.x));
         if (angle < 0.0)
             angle += two_pi;
         auto sector = static_cast<int>(angle / sector_step);
         if (sector < 0)
             sector = 0;
-        if (sector >= descriptor.num_sectors)
-            sector = descriptor.num_sectors - 1;
+        if (sector >= sectors)
+            sector = sectors - 1;
 
-        const auto height = point.z;
-        if (height > descriptor.data(ring, sector))
-            descriptor.data(ring, sector) = height;
+        auto& cell = cells[static_cast<std::size_t>(ring) * sectors + sector];
+        if (z > cell.max_z)
+            cell.max_z = z;
+        if (z < cell.min_z)
+            cell.min_z = z;
+        cell.count += 1;
+    }
+
+    for (auto r = 0; r < rings; ++r) {
+        for (auto s = 0; s < sectors; ++s) {
+            const auto& cell = cells[static_cast<std::size_t>(r) * sectors + s];
+            if (cell.count == 0)
+                continue;
+
+            // ch0: 最高点高度，相对 [z_min, z_max] 归一化
+            const auto ch0 = std::clamp((cell.max_z - z_min) / z_span, 0.0f, 1.0f);
+            // ch1: log 密度，count>=64 时封顶到 1
+            const auto ch1 =
+                std::clamp(std::log2(1.0f + static_cast<float>(cell.count)) / DENSITY_LOG_DENOM,
+                           0.0f, 1.0f);
+            // ch2: cell 内 z 跨度，区分平面（地面/水平面）与立面（柱/箱角）
+            const auto ch2 = std::clamp((cell.max_z - cell.min_z) / z_span, 0.0f, 1.0f);
+
+            descriptor.data(r, s) = ch0;
+            descriptor.data(rings + r, s) = ch1;
+            descriptor.data(2 * rings + r, s) = ch2;
+        }
     }
 
     return descriptor;
@@ -87,7 +140,9 @@ auto best_shifted_distance(
     auto best = ShiftedDistance {};
 
     if (query.num_rings != target.num_rings || query.num_sectors != target.num_sectors
-        || query.num_sectors <= 0 || query.num_rings <= 0)
+        || query.channel_count != target.channel_count
+        || query.num_sectors <= 0 || query.num_rings <= 0
+        || query.data.rows() != target.data.rows() || query.data.cols() != target.data.cols())
         return best;
 
     const auto num_sectors = query.num_sectors;

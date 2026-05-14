@@ -2,7 +2,7 @@
  * @file registration_tools.cpp
  * @brief 点云配准工具实现
  *
- * 提供 INITIAL / LOCAL / WIDE 三个独立配准入口。共用 MultiStageGicp（coarse → refine → precise）
+ * 提供 INITIAL / LOCAL / WIDE 三个独立配准入口。共用 TwoStageGicp（coarse → precise）
  * 与 yaw 搜索 + top-k 候选 + 可选 map consistency filter。
  */
 
@@ -36,38 +36,25 @@ namespace {
 using GicpRegistrator = small_gicp::RegistrationPCL<Point, Point>;
 using PointCloudPtr = std::shared_ptr<PointCloud>;
 
-/// refine 窗口取 coarse / refine yaw step 的较大值，加大默认下限保证窗口非零
-auto refine_window(double coarse_step_deg, double refine_step_deg, double default_floor) -> double {
-    return std::max(
-        sanitize_step(coarse_step_deg, default_floor), sanitize_step(refine_step_deg, 15.0));
-}
-
-/// 多阶段 GICP 的统一参数包（INITIAL / LOCAL / WIDE 三处复用）
+/// 两阶段 GICP 的统一参数包（INITIAL / LOCAL / WIDE 三处复用）
 struct StageParams {
     int coarse_iterations = 12;
-    int refine_iterations = 8;
     int precise_iterations = 20;
 
     double yaw_window_deg = 15.0;
     double coarse_step_deg = 15.0;
-    double refine_step_deg = 15.0;
-    double refine_window_deg = 15.0;
 
     std::size_t coarse_top_k = 1;
     double coarse_score_threshold = std::numeric_limits<double>::infinity();
     double max_correspondence_distance = 0.5;
-    double submap_radius_m = 3.5;
     double max_distance_from_prior_m = 3.0;
 
     static auto from_initial(const InitialRegistrationConfig& c) -> StageParams {
         return StageParams{
             .coarse_iterations = sanitize_iterations(c.coarse_iterations, 12),
-            .refine_iterations = sanitize_iterations(c.refine_iterations, 8),
             .precise_iterations = sanitize_iterations(c.precise_iterations, 20),
             .yaw_window_deg = sanitize_non_negative(c.yaw_search_window_deg, 0.0),
             .coarse_step_deg = sanitize_step(c.coarse_yaw_step_deg, 1.0),
-            .refine_step_deg = sanitize_step(c.refine_yaw_step_deg, 1.0),
-            .refine_window_deg = refine_window(c.coarse_yaw_step_deg, c.refine_yaw_step_deg, 15.0),
             .coarse_top_k = std::max<std::size_t>(1, c.coarse_top_k),
             .coarse_score_threshold = sanitize_non_negative(c.score_threshold, 0.04),
             .max_correspondence_distance =
@@ -78,34 +65,26 @@ struct StageParams {
     static auto from_local(const LocalRegistrationConfig& c) -> StageParams {
         return StageParams{
             .coarse_iterations = sanitize_iterations(c.coarse_iterations, 10),
-            .refine_iterations = sanitize_iterations(c.refine_iterations, 5),
             .precise_iterations = sanitize_iterations(c.precise_iterations, 15),
             .yaw_window_deg = sanitize_non_negative(c.yaw_window_deg, 0.0),
             .coarse_step_deg = sanitize_step(c.coarse_yaw_step_deg, 1.0),
-            .refine_step_deg = sanitize_step(c.refine_yaw_step_deg, 1.0),
-            .refine_window_deg = refine_window(c.coarse_yaw_step_deg, c.refine_yaw_step_deg, 15.0),
             .coarse_top_k = 1,
             .coarse_score_threshold = sanitize_non_negative(c.coarse_score_threshold, 0.3),
             .max_correspondence_distance =
                 sanitize_non_negative(c.max_correspondence_distance_m, 0.9),
-            .submap_radius_m = sanitize_non_negative(c.submap_radius_m, 3.5),
         };
     }
 
     static auto from_wide(const WideRegistrationConfig& c) -> StageParams {
         return StageParams{
             .coarse_iterations = sanitize_iterations(c.coarse_iterations, 12),
-            .refine_iterations = sanitize_iterations(c.refine_iterations, 8),
             .precise_iterations = sanitize_iterations(c.precise_iterations, 20),
             .yaw_window_deg = sanitize_non_negative(c.yaw_window_deg, 0.0),
             .coarse_step_deg = sanitize_step(c.coarse_yaw_step_deg, 1.0),
-            .refine_step_deg = sanitize_step(c.refine_yaw_step_deg, 1.0),
-            .refine_window_deg = refine_window(c.coarse_yaw_step_deg, c.refine_yaw_step_deg, 22.5),
             .coarse_top_k = std::max<std::size_t>(1, c.max_candidate_count),
             .coarse_score_threshold = sanitize_non_negative(c.coarse_score_threshold, 0.15),
             .max_correspondence_distance =
                 sanitize_non_negative(c.max_correspondence_distance_m, 0.9),
-            .submap_radius_m = sanitize_non_negative(c.submap_radius_m, 5.0),
             .max_distance_from_prior_m = sanitize_non_negative(c.max_distance_from_prior_m, 10.0),
         };
     }
@@ -196,7 +175,7 @@ class GicpAligner {
 public:
     GicpAligner(
         int iterations, double max_correspondence_distance_m, PointCloudPtr source,
-        PointCloudPtr target, double epsilon = 1e-6)
+        PointCloudPtr target, double epsilon = 1e-3)
         : max_correspondence_distance_m_(max_correspondence_distance_m) {
         registrator_.setRegistrationType("VGICP");
         registrator_.setVoxelResolution(0.2);
@@ -369,10 +348,9 @@ auto apply_map_consistency_filter(
     };
 }
 
-class MultiStageGicp {
+class TwoStageGicp {
     StageParams params_;
     GicpAligner coarse_;
-    GicpAligner refine_;
     GicpAligner precise_;
     std::size_t source_size_ = 0;
     std::size_t target_size_ = 0;
@@ -423,45 +401,6 @@ class MultiStageGicp {
         return coarse_results;
     }
 
-    [[nodiscard]] auto run_refine(const std::vector<ScoredTransform>& coarse_results)
-        -> std::optional<ScoredTransform> {
-        auto best_refine = std::optional<ScoredTransform>{};
-        auto tried_count = std::size_t{};
-        auto converged_count = std::size_t{};
-
-        for (const auto& coarse_result : coarse_results) {
-            const auto candidates = generate_yaw_candidates(
-                coarse_result.transform, params_.refine_window_deg, params_.refine_step_deg);
-            tried_count += candidates.size();
-            for (const auto& candidate_guess : candidates) {
-                if (auto candidate = refine_.try_align(candidate_guess); candidate.has_value()) {
-                    ++converged_count;
-                    if (!best_refine || candidate->score < best_refine->score)
-                        best_refine = candidate;
-                }
-            }
-        }
-
-        const auto prefix = log_prefix(label_);
-        if (!best_refine) {
-            // 调参诊断日志：记录 GICP refine 阶段失败，区分 coarse 成功但 refine 不收敛的情况。
-            RCLCPP_WARN(
-                relocation_logger(),
-                "%.*s GICP refine failed: tried=%zu converged=0 refine_window=%.1f step=%.1f "
-                "iter=%d max_corr=%.2f",
-                prefix.size, prefix.data, tried_count, params_.refine_window_deg,
-                params_.refine_step_deg, params_.refine_iterations,
-                params_.max_correspondence_distance);
-            return best_refine;
-        }
-
-        // 调参诊断日志：记录 refine 阶段收敛数量与最好 score。
-        RCLCPP_INFO(
-            relocation_logger(), "%.*s GICP refine ok: tried=%zu converged=%zu best_score=%.4f",
-            prefix.size, prefix.data, tried_count, converged_count, best_refine->score);
-        return best_refine;
-    }
-
     [[nodiscard]] auto run_precise(const Eigen::Isometry3f& guess)
         -> std::optional<PipelineResult> {
         const auto prefix = log_prefix(label_);
@@ -493,81 +432,86 @@ class MultiStageGicp {
     }
 
 public:
-    MultiStageGicp(
+    TwoStageGicp(
         const StageParams& params, PointCloudPtr source, PointCloudPtr target,
         std::string_view label)
         : params_(params)
         , coarse_(params_.coarse_iterations, params_.max_correspondence_distance, source, target)
-        , refine_(params_.refine_iterations, params_.max_correspondence_distance, source, target)
         , precise_(
-              params_.precise_iterations, params_.max_correspondence_distance, source, target, 1e-5)
+              params_.precise_iterations, params_.max_correspondence_distance, source, target, 1e-4)
         , source_size_(source ? source->size() : 0)
         , target_size_(target ? target->size() : 0)
         , label_(label) {}
 
-    [[nodiscard]] auto run(const Eigen::Isometry3f& guess, bool require_refine_convergence)
+    [[nodiscard]] auto run(const Eigen::Isometry3f& guess)
         -> std::optional<PipelineResult> {
         auto coarse_results = run_coarse(guess);
         if (!coarse_results)
             return std::nullopt;
 
-        auto refined_result = run_refine(coarse_results.value());
-        if (!refined_result) {
-            if (require_refine_convergence)
-                return std::nullopt;
-            refined_result = coarse_results->front();
+        auto best_precise = std::optional<PipelineResult>{};
+        auto tried_count = std::size_t{};
+        auto converged_count = std::size_t{};
+        for (const auto& coarse_result : coarse_results.value()) {
+            ++tried_count;
+            auto precise_result = run_precise(coarse_result.transform);
+            if (!precise_result)
+                continue;
+
+            ++converged_count;
+            if (!best_precise || precise_result->score < best_precise->score)
+                best_precise = precise_result;
         }
 
-        return run_precise(refined_result->transform);
+        const auto prefix = log_prefix(label_);
+        if (!best_precise) {
+            RCLCPP_WARN(
+                relocation_logger(), "%.*s GICP precise failed for all coarse candidates: "
+                                     "tried=%zu converged=0 iter=%d max_corr=%.2f",
+                prefix.size, prefix.data, tried_count, params_.precise_iterations,
+                params_.max_correspondence_distance);
+            return std::nullopt;
+        }
+
+        RCLCPP_INFO(
+            relocation_logger(),
+            "%.*s GICP two-stage ok: precise_tried=%zu precise_converged=%zu best_score=%.4f "
+            "best_inlier=%.3f",
+            prefix.size, prefix.data, tried_count, converged_count, best_precise->score,
+            best_precise->inlier_ratio);
+        return best_precise;
     }
 };
 
 /**
- * @brief 单 seed 配准：extract_submap → preprocess → optional consistency filter → MultiStageGicp
- *        LOCAL 用 LocalRegistrationConfig 的 enable_map_consistency_filter /
- * map_consistency_distance_m, WIDE 用 WideRegistrationConfig 的对应字段；通过两个 bool/double
- * 参数显式传入解耦。
+ * @brief 单 seed 配准：optional consistency filter → TwoStageGicp
+ *
+ * map_target_cloud 必须由 preprocess_map() 预处理过；run_seed_pipeline 不再切 submap，
+ * 直接把全图作为 GICP target。这样 query 里的远处/场外点也能找到对应，
+ * 是 RM 这种镜像对称场地里消歧的关键信号。
  */
 auto run_seed_pipeline(
-    const PointCloudPtr& filtered_query, const PointCloudPtr& map_world_cloud,
-    const pcl::KdTreeFLANN<Point>& map_kdtree, const Eigen::Isometry3f& seed_world_to_base,
-    const RegistrationPrior& prior, const InitialRegistrationConfig& initial_config,
+    const PointCloudPtr& filtered_query, const PointCloudPtr& map_target_cloud,
+    const Eigen::Isometry3f& seed_world_to_base, const RegistrationPrior& prior,
     const StageParams& stage, bool enable_consistency_filter, double consistency_distance_m,
     double min_retained_fraction, std::string_view label) -> std::optional<PipelineResult> {
     const auto prefix = log_prefix(label);
-    constexpr auto submap_radius_fallback = 5.0;
-    auto map_submap = extract_submap_radius(
-        map_kdtree, map_world_cloud, seed_world_to_base.translation(), stage.submap_radius_m,
-        submap_radius_fallback);
-    if (!map_submap || map_submap->empty()) {
-        // 调参诊断日志：记录 seed 周围没有子地图，通常是 SC seed 出界或地图范围配置错误。
+    if (!map_target_cloud || map_target_cloud->empty()) {
         RCLCPP_WARN(
-            relocation_logger(), "%.*s seed submap empty around (%.3f, %.3f, %.3f), skip",
-            prefix.size, prefix.data, seed_world_to_base.translation().x(),
-            seed_world_to_base.translation().y(), seed_world_to_base.translation().z());
+            relocation_logger(), "%.*s map_target_cloud empty, skip", prefix.size, prefix.data);
         return std::nullopt;
     }
-
-    auto filtered_map = preprocess_cloud(map_submap, initial_config, false);
-    if (!filtered_map || filtered_map->empty()) {
-        // 调参诊断日志：记录子地图预处理后为空。
-        RCLCPP_WARN(
-            relocation_logger(), "%.*s map preprocess empty: submap_raw=%zu", prefix.size,
-            prefix.data, map_submap->size());
-        return std::nullopt;
-    }
+    const auto& filtered_map = map_target_cloud;
 
     // 调参诊断日志：记录进入单 seed GICP 前的 query/map 点数和关键 local 参数。
     RCLCPP_INFO(
         relocation_logger(),
-        "%.*s seed setup: query_filtered=%zu submap_raw=%zu map_filtered=%zu "
-        "submap_radius=%.2f max_corr=%.2f iter=%d/%d/%d yaw=%.1f step=%.1f/%.1f "
-        "seed=(%.2f,%.2f,%.1fdeg)",
-        prefix.size, prefix.data, filtered_query ? filtered_query->size() : 0, map_submap->size(),
-        filtered_map->size(), stage.submap_radius_m, stage.max_correspondence_distance,
-        stage.coarse_iterations, stage.refine_iterations, stage.precise_iterations,
-        stage.yaw_window_deg, stage.coarse_step_deg, stage.refine_step_deg,
-        seed_world_to_base.translation().x(), seed_world_to_base.translation().y(),
+        "%.*s seed setup: query_filtered=%zu map_filtered=%zu max_corr=%.2f iter=%d/%d yaw=%.1f "
+        "step=%.1f seed=(%.2f,%.2f,%.1fdeg)",
+        prefix.size, prefix.data, filtered_query ? filtered_query->size() : 0, filtered_map->size(),
+        stage.max_correspondence_distance, stage.coarse_iterations, stage.precise_iterations,
+        stage.yaw_window_deg, stage.coarse_step_deg, seed_world_to_base.translation().x(),
+        seed_world_to_base.translation().y(),
         std::atan2(
             static_cast<double>(seed_world_to_base.rotation()(1, 0)),
             static_cast<double>(seed_world_to_base.rotation()(0, 0)))
@@ -601,8 +545,8 @@ auto run_seed_pipeline(
 
     const auto seed_world_to_odom =
         world_to_odom_from_world_to_base(seed_world_to_base, prior.odom_to_base);
-    auto pipeline = MultiStageGicp{stage, seed_filtered_query, filtered_map, label};
-    return pipeline.run(seed_world_to_odom, true);
+    auto pipeline = TwoStageGicp{stage, seed_filtered_query, filtered_map, label};
+    return pipeline.run(seed_world_to_odom);
 }
 
 } // namespace
@@ -618,60 +562,25 @@ auto transform_pointcloud(
     return !target.empty();
 }
 
-auto extract_submap_radius(
-    const pcl::KdTreeFLANN<Point>& kdtree, const std::shared_ptr<PointCloud>& map_world_cloud,
-    const Eigen::Vector3f& center, double radius_m, double fallback_radius_m)
-    -> std::shared_ptr<PointCloud> {
-    auto submap = std::make_shared<PointCloud>();
-    if (!map_world_cloud || map_world_cloud->empty())
-        return submap;
-
-    auto center_point = Point{};
-    center_point.x = center.x();
-    center_point.y = center.y();
-    center_point.z = center.z();
-
-    std::vector<int> indices;
-    std::vector<float> distances;
-    kdtree.radiusSearch(
-        center_point,
-        static_cast<float>(std::max(0.1, sanitize_non_negative(radius_m, fallback_radius_m))),
-        indices, distances);
-
-    submap->reserve(indices.size());
-    for (const auto index : indices)
-        submap->points.push_back(map_world_cloud->points[static_cast<std::size_t>(index)]);
-    submap->width = static_cast<std::uint32_t>(submap->size());
-    submap->height = 1;
-    submap->is_dense = map_world_cloud->is_dense;
-    return submap;
-}
-
-auto extract_submap_radius(
-    const std::shared_ptr<PointCloud>& map_world_cloud, const Eigen::Vector3f& center,
-    double radius_m, double fallback_radius_m) -> std::shared_ptr<PointCloud> {
-    if (!map_world_cloud || map_world_cloud->empty())
-        return std::make_shared<PointCloud>();
-
-    auto kdtree = pcl::KdTreeFLANN<Point>{};
-    kdtree.setInputCloud(map_world_cloud);
-    return extract_submap_radius(kdtree, map_world_cloud, center, radius_m, fallback_radius_m);
+auto preprocess_map(
+    const std::shared_ptr<PointCloud>& raw_map_cloud,
+    const InitialRegistrationConfig& initial_config) -> std::shared_ptr<PointCloud> {
+    return preprocess_cloud(raw_map_cloud, initial_config, true);
 }
 
 auto run_initial(
     const InitialRegistrationConfig& initial_config,
     const std::shared_ptr<PointCloud>& query_odom_cloud,
-    const std::shared_ptr<PointCloud>& map_world_cloud,
+    const std::shared_ptr<PointCloud>& map_target_cloud,
     const Eigen::Isometry3f& world_to_odom_guess, Eigen::Isometry3f& world_to_odom_result,
     double& score) -> bool {
     auto filtered_query = prepare_filtered_query(query_odom_cloud, initial_config);
-    auto filtered_map = preprocess_cloud(map_world_cloud, initial_config, true);
-    if (!filtered_query || !filtered_map || filtered_map->empty())
+    if (!filtered_query || !map_target_cloud || map_target_cloud->empty())
         return false;
 
-    auto pipeline = MultiStageGicp{
-        StageParams::from_initial(initial_config), filtered_query, filtered_map, "initial"};
-    auto pipeline_result = pipeline.run(world_to_odom_guess, false);
+    auto pipeline = TwoStageGicp{
+        StageParams::from_initial(initial_config), filtered_query, map_target_cloud, "initial"};
+    auto pipeline_result = pipeline.run(world_to_odom_guess);
     if (!pipeline_result)
         return false;
 
@@ -683,8 +592,8 @@ auto run_initial(
 auto run_local(
     const InitialRegistrationConfig& initial_config, const LocalRegistrationConfig& local_config,
     const std::shared_ptr<PointCloud>& query_odom_cloud,
-    const std::shared_ptr<PointCloud>& map_world_cloud, const pcl::KdTreeFLANN<Point>& map_kdtree,
-    const RegistrationPrior& prior, RegistrationResult& result) -> bool {
+    const std::shared_ptr<PointCloud>& map_target_cloud, const RegistrationPrior& prior,
+    RegistrationResult& result) -> bool {
     result = RegistrationResult{};
     if (!prior.has_prior)
         return false;
@@ -708,8 +617,8 @@ auto run_local(
         initial_config.voxel_leaf_m, initial_config.outlier_mean_k,
         initial_config.outlier_stddev_mul_thresh);
     auto pipeline_result = run_seed_pipeline(
-        filtered_query, map_world_cloud, map_kdtree, prior.world_to_base, prior, initial_config,
-        stage, local_config.enable_map_consistency_filter, local_config.map_consistency_distance_m,
+        filtered_query, map_target_cloud, prior.world_to_base, prior, stage,
+        local_config.enable_map_consistency_filter, local_config.map_consistency_distance_m,
         local_config.min_retained_fraction, "local");
     if (!pipeline_result)
         return false;
@@ -725,13 +634,11 @@ auto run_local(
 WideSeedRunner::WideSeedRunner(
     const InitialRegistrationConfig& initial_config, const WideRegistrationConfig& wide_config,
     const std::shared_ptr<PointCloud>& query_odom_cloud,
-    const std::shared_ptr<PointCloud>& map_world_cloud, const pcl::KdTreeFLANN<Point>& map_kdtree,
-    const RegistrationPrior& prior)
+    const std::shared_ptr<PointCloud>& map_target_cloud, const RegistrationPrior& prior)
     : initial_config_(initial_config)
     , wide_config_(wide_config)
     , filtered_query_(prepare_filtered_query(query_odom_cloud, initial_config))
-    , map_world_cloud_(map_world_cloud)
-    , map_kdtree_(map_kdtree)
+    , map_target_cloud_(map_target_cloud)
     , prior_(prior) {}
 
 auto WideSeedRunner::valid() const -> bool { return static_cast<bool>(filtered_query_); }
@@ -744,8 +651,8 @@ auto WideSeedRunner::run(
 
     const auto stage = StageParams::from_wide(wide_config_);
     auto pipeline_result = run_seed_pipeline(
-        filtered_query_, map_world_cloud_, map_kdtree_, seed_world_to_base, prior_, initial_config_,
-        stage, wide_config_.enable_map_consistency_filter, wide_config_.map_consistency_distance_m,
+        filtered_query_, map_target_cloud_, seed_world_to_base, prior_, stage,
+        wide_config_.enable_map_consistency_filter, wide_config_.map_consistency_distance_m,
         wide_config_.min_retained_fraction, "wide");
     if (!pipeline_result)
         return false;
@@ -761,20 +668,18 @@ auto WideSeedRunner::run(
 auto run_wide_seed(
     const InitialRegistrationConfig& initial_config, const WideRegistrationConfig& wide_config,
     const std::shared_ptr<PointCloud>& query_odom_cloud,
-    const std::shared_ptr<PointCloud>& map_world_cloud, const pcl::KdTreeFLANN<Point>& map_kdtree,
-    const RegistrationPrior& prior, const Eigen::Isometry3f& seed_world_to_base,
-    RegistrationResult& result) -> bool {
-    const auto runner = WideSeedRunner{initial_config,  wide_config, query_odom_cloud,
-                                       map_world_cloud, map_kdtree,  prior};
+    const std::shared_ptr<PointCloud>& map_target_cloud, const RegistrationPrior& prior,
+    const Eigen::Isometry3f& seed_world_to_base, RegistrationResult& result) -> bool {
+    const auto runner = WideSeedRunner{
+        initial_config, wide_config, query_odom_cloud, map_target_cloud, prior};
     return runner.run(seed_world_to_base, result);
 }
 
 auto run_wide(
     const InitialRegistrationConfig& initial_config, const WideRegistrationConfig& wide_config,
     const std::shared_ptr<PointCloud>& query_odom_cloud,
-    const std::shared_ptr<PointCloud>& map_world_cloud, const pcl::KdTreeFLANN<Point>& map_kdtree,
-    const RegistrationPrior& prior, const std::vector<Eigen::Isometry3f>& seeds_world_to_base,
-    RegistrationResult& result) -> bool {
+    const std::shared_ptr<PointCloud>& map_target_cloud, const RegistrationPrior& prior,
+    const std::vector<Eigen::Isometry3f>& seeds_world_to_base, RegistrationResult& result) -> bool {
     result = RegistrationResult{};
     if (seeds_world_to_base.empty())
         return false;
@@ -790,9 +695,9 @@ auto run_wide(
 
     for (const auto& seed_world_to_base : seeds_world_to_base) {
         auto pipeline_result = run_seed_pipeline(
-            filtered_query, map_world_cloud, map_kdtree, seed_world_to_base, prior, initial_config,
-            stage, wide_config.enable_map_consistency_filter,
-            wide_config.map_consistency_distance_m, wide_config.min_retained_fraction, "wide");
+            filtered_query, map_target_cloud, seed_world_to_base, prior, stage,
+            wide_config.enable_map_consistency_filter, wide_config.map_consistency_distance_m,
+            wide_config.min_retained_fraction, "wide");
         if (!pipeline_result)
             continue;
 

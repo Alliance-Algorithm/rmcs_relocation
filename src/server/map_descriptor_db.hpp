@@ -14,18 +14,22 @@ namespace rmcs::location {
 /**
  * @brief 离线生成的地图 SC 描述子数据库
  *
- * 文件格式（v2，SCDS）：
+ * 文件格式（v3，SCDS）：
  *   header:
- *     magic        char[4]   = "SCDS"
- *     version      uint32_le = 2
- *     num_desc     uint32_le
- *     num_rings    uint32_le
- *     num_sectors  uint32_le
- *     max_radius   float32_le
- *     map_hash     uint32_le  (FNV-1a, 见 ScanContextConfig docs)
+ *     magic         char[4]   = "SCDS"
+ *     version       uint32_le = 3
+ *     num_desc      uint32_le
+ *     num_rings     uint32_le  (语义 ring 数，不含通道堆叠)
+ *     num_sectors   uint32_le
+ *     channel_count uint32_le  (= SC_CHANNEL_COUNT，目前 3)
+ *     max_radius    float32_le
+ *     z_min         float32_le
+ *     z_max         float32_le
+ *     map_hash      uint32_le  (FNV-1a, 见 ScanContextConfig docs)
  *   for i in [0, num_desc):
- *     world_xyz    float32_le * 3
- *     desc_data    float32_le * (num_rings * num_sectors), row-major
+ *     world_xyz     float32_le * 3
+ *     desc_data     float32_le * (num_rings * channel_count * num_sectors), row-major
+ *                   row 排布：[ch0_rings | ch1_rings | ch2_rings]
  */
 class MapDescriptorDB {
 public:
