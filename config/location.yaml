@@ -3,10 +3,10 @@ rmcs_relocation:
     # map / frame / service ---------------------------------------------------
     # 全局 PCD 地图路径，启动时读取后作为所有 GICP 匹配的 target 点云。
     map_path: "/rmcs_install/share/rmcs_relocation/maps/1.pcd"
-    # map_path: "/workspaces/RMCS/rmcs_ws/src/rmcs-navigation-deps/rmcs_relocation/maps/my.pcd"
+    # map_path: "/workspaces/RMCS/rmcs_ws/src/rmcs-navigation-deps/rmcs_relocation/maps/1.pcd"
     # Scan Context 描述子库路径，local/wide 用它查候选 seed；配置必须和当前地图匹配。
     descriptor_path: "/rmcs_install/share/rmcs_relocation/maps/1.sc_desc"
-    # descriptor_path: "/workspaces/RMCS/rmcs_ws/src/rmcs-navigation-deps/rmcs_relocation/maps/my.sc_desc"
+    # descriptor_path: "/workspaces/RMCS/rmcs_ws/src/rmcs-navigation-deps/rmcs_relocation/maps/1.sc_desc"
     world_frame: "world"
     odom_frame: "odom"
     base_frame: "base_link"
@@ -32,9 +32,9 @@ rmcs_relocation:
         num_sectors: 60
         max_radius_m: 20.0
         # 构建描述子时保留点的最低 z，高于地面可减少地面噪声。
-        z_min_m: 0.05
+        z_min_m: 0.03
         # 构建描述子时保留点的最高 z，低于天花板/残点可减少高处噪声。
-        z_max_m: 3.0
+        z_max_m: 2.0
 
     # diagnostics.* -----------------------------------------------------------
     diagnostics:
@@ -63,7 +63,7 @@ rmcs_relocation:
         # coarse 阶段变换更新收敛阈值，越小迭代越充分但更慢。
         coarse_transformation_epsilon: 0.001
         # precise 阶段变换更新收敛阈值，越小最终解更细但更慢。
-        precise_transformation_epsilon: 0.0001
+        precise_transformation_epsilon: 0.001
 
     # initial.* — MODE_INITIAL=0 ---------------------------------------------
     initial:
@@ -77,7 +77,7 @@ rmcs_relocation:
         # initial GICP 最大对应点距离，单位 m；越大收敛域越宽但误匹配更多。
         max_correspondence_distance_m: 4.0
         # initial 最终 score 验收阈值，越小越严格；该值同时传给 validator。
-        score_threshold: 0.02
+        score_threshold: 0.02                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    
 
         # initial 以请求 initial_guess 为中心搜索 yaw 的半窗口，单位 deg。
         yaw_search_window_deg: 30.0
@@ -94,7 +94,7 @@ rmcs_relocation:
     # local.* — MODE_LOCAL=1 --------------------------------------------------
     local:
         collect_duration_sec: 0.5
-        min_accumulated_points: 800
+        min_accumulated_points: 700
 
         # local coarse 阶段最大迭代次数，用于从 SC/prior seed 附近粗收敛。
         coarse_iterations: 50
@@ -103,7 +103,7 @@ rmcs_relocation:
         # local GICP 最大对应点距离，单位 m；越大越能兜住 seed 偏差但更易误配。
         max_correspondence_distance_m: 4.0
         # local coarse 阶段允许进入 precise 的 score 上限，越小越早丢弃差候选。
-        coarse_score_threshold: 0.1
+        coarse_score_threshold: 0.08
 
         # local 在 SC seed yaw 周围额外搜索的半窗口，单位 deg。
         yaw_window_deg: 6.0
@@ -114,9 +114,9 @@ rmcs_relocation:
         sc_top_k: 1
 
         # local 最终 score 验收阈值，越小越严格。
-        score_threshold: 0.05
+        score_threshold: 0.03
         # local 最终 inlier ratio 验收下限，越大越严格。
-        min_inlier_ratio: 0.50
+        min_inlier_ratio: 0.30
         # local 最终结果相对当前 prior 的最大平移距离，单位 m。
         max_distance_from_prior_m: 6.0
         # local 最终结果相对当前 prior 的最大 yaw 偏差，单位 deg。
